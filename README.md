@@ -1,36 +1,108 @@
-# EVA 车载 G 值表固件
+# GValueMeter · 车载 G 值表 + 屏幕宠物
 
-> 为 **微雪 ESP32-S3-Touch-AMOLED-2.16** 开发的车载 G 值表固件，复刻小红书博主「飞翔的AMX」的 DIY 项目功能，采用 EVA / NERV 主题界面。
->
+**微雪 ESP32-S3-Touch-AMOLED-2.16 上的六轴 G 值表固件**：把一块 2.16 英寸方形 AMOLED 挂在车里，实时显示过弯 / 加减速的 G 值，还养了一只跟着车身一起晃的表情宠物，按 PWR 键还能变成一块音乐频谱灯。
+
+灵感来自小红书 @飞翔的AMX 的 DIY 分享（领克 Z20 不给适配 EVA，只能自己做 🐶），界面走了 EVA / NERV 那一套深色 + 荧光绿的仪表盘风格。
+
+![宣传海报](docs/poster.jpg)
 
 ---
 
-## 功能
+## 目录
 
-### 🐾 宠物模式（滑动切换）
-- **待机表情**：圆脸呼吸动画 + 眨眼高光
-- **加速表情**：^_^ 兴奋眼、张嘴、速度线
-- **减速表情**：> < 震惊眼、O 型嘴、感叹号
-- **减速带 / 颠簸**：X 眼抖动 + 旋转星星
-- **左右转弯**：眼睛看向转向侧 + 侧倾动感线
-- **听歌哼歌同步**：板载 ES7210 双麦采集音量/节拍，驱动嘴巴开合 + 音符跳动
-- 顶部显示**当前 G 值**与**历史最大 G 值**
+- [它能干什么](#它能干什么)
+- [功能一览](#功能一览)
+- [按键操作](#按键操作)
+- [硬件](#硬件)
+- [技术架构](#技术架构)
+- [编译与烧录](#编译与烧录)
+- [串口命令](#串口命令)
+- [模拟器](#模拟器)
+- [目录结构](#目录结构)
+- [已知限制](#已知限制)
+- [致谢](#致谢)
 
-### 📊 专业 G 值模式
-- 大号**当前合成 G 值**
-- **历史最大 G 值**
-- 三轴分量条：**X 侧向 / Y 纵向 / Z 竖直**（中心零位，±1g 满量程）
-- **实时 G 值曲线**（最近 120 点，带 0.8G 报警参考线）
-- **G > 0.8 红框报警**（闪烁红框 + HIGH G 提示）
+---
 
-### 操作
+## 它能干什么
 
-| 操作 | 功能 |
+一句话：**开车时它告诉你「刚刚那一下有多狠」，不开车时它是一只会晕车的小宠物。**
+
+![功能总览](docs/feature-overview.png)
+
+### 三种界面
+
+| 界面 | 内容 |
 |------|------|
-| 左滑 | 进入专业 G 值模式 |
-| 右滑 | 返回宠物模式 |
-| 单击屏幕 | 重置历史最大 G 值 |
-| 上电 | 自动校准 IMU 零偏（保持静止约 1 秒） |
+| 🐾 宠物模式 | 一张圆脸 + 顶部实时 / 最大 G 值；表情跟着车身动 |
+| 📊 专业模式 | 七段数码大数字当前 G、三轴分量条、最近 12 秒 G 曲线、0.8G 高 G 报警 |
+| 🎯 G-G 圆盘 | 一个圆盘看清当前 G 向量方向与四向峰值 |
+| 🎵 音乐频谱 | 20 柱音频频谱，跟着车里放的音乐跳 |
+
+### 样机
+
+![样机](docs/mockup.jpg)
+
+---
+
+## 功能一览
+
+### 🐾 宠物模式
+
+- **待机**：呼吸节奏的圆脸，只剩一张脸，屏上不显示任何字（长按 BOOT 才开始测量）
+- **加速 / 刹车**：整张脸顺着惯性的反方向大幅甩动，眼睛跟着瞪大 / 眯起，配挤压拉伸
+- **左右转弯**：脸侧倾 + 视线偏移，幅度随横向 G 增大
+- **减速带 / 颠簸**：X 眼 + 旋转星星，触发用峰值差 + 冷却时间，不会过一个小坑就抽一下
+- **听歌**：板载 ES7210 双麦检测到一定音量以上才判定「在唱歌」，嘴巴开合 + 音符飘出；安静时不乱动
+- **闲置小动作**：随机打哈欠（闭眼 + 大张嘴 + 头顶 Zzz）、视线游移
+- **高 G**：超过阈值额头掉汗滴
+- 单击 **BOOT** 可以隐藏 / 显示页面上的 G 值（状态写进 NVS，断电还记得）
+
+### 📊 专业模式
+
+- 七段数码**当前合成 G 值**（字间距单独调校，数字不会粘在一起）
+- 顶部：电量图标（AXP2101 读数，充电时显示闪电）、历史最大 G
+- 三轴分量条：侧向 / 纵向 / 竖直，中心零位、±1g 满量程
+- 实时曲线：最近 12 秒，含 0.8G 报警参考线，黄段标出超限区
+- **高 G 报警**：整屏圆角红框呼吸闪烁 + HIGH G 横幅，边框圆角贴合屏幕四角的圆弧
+- 底部图例：-12秒 / 0.8报警 / 最大 / 现在
+
+![专业模式](docs/pro-normal.png)
+
+### 🎯 G-G 圆盘
+
+- 当前 G 向量在圆盘上的位置 + 拖尾，直观看出「现在是被横着推还是被竖着压」
+- 四个方向的峰值分别标在盘四周，一屏看全
+- 高 G 时同样走圆角红框报警
+
+![G-G 圆盘](docs/gg-alarm.png)
+
+### 🎵 音乐频谱
+
+- **任意页面按 PWR 键即可切换到频谱**，再按一次回到原界面
+- 20 根柱子铺满整屏宽度（8 → 472），横向渐变 + 峰值帽 + 短倒影
+- **带噪声门**：先跟踪房间底噪，只有超过门限的音量才画（安静时频谱不会自己抖）
+- 麦克风增益可调（ES7210 PGA，当前 42dB），配合 dB 压缩 + 只升不降的轻度 AGC
+
+![音乐频谱](docs/spectrum.png)
+
+### 麦克风只在需要时开着
+
+宠物模式「测量中」和频谱模式才启用麦克风，专业页 / G-G 页一律关闭采集，省电也省心。
+
+---
+
+## 按键操作
+
+| 按键 | 引脚 | 操作 | 功能 |
+|------|------|------|------|
+| BOOT | GPIO0 | 单击 | 宠物页隐藏 / 显示 G 值（存 NVS） |
+| BOOT | GPIO0 | 长按 1.5s | 开始 / 停止测量（待机 ⇄ 测量） |
+| KEY3 | GPIO18 | 单击 | 下一个界面（宠物 → 专业 → G-G） |
+| KEY3 | GPIO18 | 长按 | 开始测量 |
+| PWR | AXP2101 PWRON | 单击 | 切换音乐频谱（任意页面） |
+
+> **不使用触摸**：这块屏的 CST9220 在真机上干扰大，全部交互改成按键，戴手套开车也能按。
 
 ---
 
@@ -39,97 +111,147 @@
 | 项目 | 规格 |
 |------|------|
 | 主控 | ESP32-S3R8（8MB OPI PSRAM + 16MB Flash，240MHz） |
-| 屏幕 | 2.16" AMOLED 480×480，CO5300 驱动，QSPI |
-| 触摸 | CST9220 电容触摸 |
-| IMU | QMI8658 六轴加速度计 + 陀螺仪 |
-| 麦克风 | ES7210 双麦克风 ADC |
-| 供电 | Type-C / 3.7V 锂电池（MX1.25） |
+| 屏幕 | 2.16" AMOLED 480×480，CO5300 驱动，QSPI，四角为圆弧（等效吃掉约 30px） |
+| IMU | QMI8658 六轴加速度计 + 陀螺仪（I2C 0x6B） |
+| 麦克风 | ES7210 双麦 ADC（I2S，0x40） |
+| 电源 | AXP2101 PMU：电量 / 充电状态 / PWR 按键中断 |
+| 背光 / PA | AMOLED 亮度寄存器控背光，喇叭 PA 使能 GPIO46 |
 
-> 无需额外硬件，把开发板固定车内即可（建议屏幕朝向驾驶员、粘贴牢固）。
+安装建议：固定在中控台或前挡附近、屏幕朝向驾驶员，**上电校准时保持车身静止约 1 秒**。
+
+坐标系（当前真机标定）：`lat = +X`（右转离心为正）、`lon = -Z`（加速为正）、`vert = +Y`。
+
+---
+
+## 技术架构
+
+```
+IMU 5ms 采样 ──► 低通 + 合成 G + 零偏校准 ──► 峰值 / 峰值差 / 冷却 ──► 表情事件
+MIC 16kHz ────► 高通 ──► 频段 FFT ──► dB 压缩 + AGC ──► 噪声门 ──► 频谱 / 唱歌判定
+                                                    │
+画布 (PSRAM 480×480×2) ◄── hud 基元库（七段数字 / 圆角框 / 曲线 / 气泡…）
+        │
+        └─► 48 行分带差分推屏（FNV 哈希比对，只推脏条）──► draw16bitRGBBitmap ──► CO5300
+```
+
+踩过的坑，写下来省得后来人再踩：
+
+1. **不要自己写异步 DMA 推屏给 CO5300**。自建 `panel_qspi` 异步 DMA 能把 CO5300 推成永久黑屏（此后任何推屏路径都黑，只能硬件 RESET 救回）。主流程改用 GFX 官方 `draw16bitRGBBitmap` + PSRAM 画布，稳定但只有 8~12fps；诊断命令 `lcd reinit` 可以救回黑屏。
+2. **这条 QSPI 实际吞吐只有约 6MB/s**。整屏 fill 21ms、全屏哈希 14ms、`draw16bitRGBBitmap` 73ms、`writePixels` 批量反而更慢（87ms）。所以做了 48 行分带 + 哈希差分，只推变化的条带，待机 12fps / 测量 9~10fps。
+3. **`ESP32QSPI_MAX_PIXELS_AT_ONCE` 最多 16384**，再大就报 `txdata transfer > hardware max supported len`。
+4. **屏幕四角会吃掉约 30px**。贴边内容要落在 [30, 450] 安全区，报警框必须用圆角边框而不是直角矩形，否则会在屏角处"戳出去"。
+5. **麦克风电平很低**。ES7210 PGA 从 24dB 提到 42dB，再用 dB 压缩（-90dB→0、-45dB→1）+ 只放大不衰减的 AGC，频谱才有动态。
 
 ---
 
 ## 编译与烧录
 
-### PlatformIO（推荐）
+固件是 **Arduino 风格 sketch**（`GValueMeter/GValueMeter.ino` + 同目录多个 `.cpp/.h`）。
 
-1. 安装 [VS Code](https://code.visualstudio.com/) + PlatformIO IDE 插件，或命令行：
-   ```bash
-   pip install platformio
-   ```
-2. 用 VS Code 打开本项目目录。
-3. 编译 / 烧录：
-   ```bash
-   pio run              # 编译
-   pio run -t upload    # 烧录（连接 USB 后）
-   pio device monitor   # 串口日志 115200
-   ```
+### Arduino CLI
 
-首次编译会自动下载 ESP32 工具链与依赖库，需联网。
+```bash
+arduino-cli compile \
+  --fqbn "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,FlashMode=qio,CPUFreq=240" \
+  GValueMeter
 
-### 依赖库（platformio.ini 已配置）
-- `GFX Library for Arduino` 1.5.0（CO5300 显示 + Canvas；1.6.x 依赖 core 3.x 的 `esp32-hal-periman.h`，与本项目 legacy I2S 不兼容）
-- `SensorLib` 0.3.3（QMI8658 + CST9220）
+arduino-cli upload -p /dev/cu.usbmodem2101 \
+  --fqbn "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,FlashMode=qio,CPUFreq=240" \
+  GValueMeter
+```
 
-> 已用 Arduino-ESP32 core 2.0.16 编译验证通过：`firmware.bin` ≈ 376KB，RAM 6.4%、Flash 5.9%。
+### Arduino IDE
 
-### Arduino IDE（可选）
-参考微雪官方文档搭建：<https://docs.waveshare.net/ESP32-S3-Touch-AMOLED-2.16/Arduino/>
-安装上述两个库，开发板选 ESP32S3 Dev Module，开启 **OPI PSRAM**、USB CDC，Flash 16MB。将 `src/` 下的 `.cpp` 与 `.h` 放到同一 sketch 目录即可。
+开发板选 **ESP32S3 Dev Module**，打开 **OPI PSRAM**、**USB CDC On Boot**，Flash 16MB、分区 `app3M_fat9M_16MB`。
+
+### 依赖
+
+- [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)（CO5300 显示 + Canvas）
+- QMI8658 / ES7210 / AXP2101 驱动已在工程内自带，不依赖 SensorLib
+
+参考体积：Sketch ≈ 504KB（16%），全局变量 ≈ 29KB，余下给了 PSRAM 画布和字库。
+
+---
+
+## 串口命令
+
+串口 115200：
+
+| 命令 | 作用 |
+|------|------|
+| `help` | 列出全部命令 |
+| `start` / `stop` | 开始 / 停止测量 |
+| `mode` / `mode pet\|pro\|gg` | 切换界面 |
+| `info` | 打印状态、轴向、峰值、帧率、绘制耗时、麦克风状态 |
+| `reset` | 清零峰值 / 历史最大 |
+| `spec on\|off` | 直接开关频谱 |
+| `bench` | 推屏基准（fill / hash / pushAll / gfxFull 四项耗时） |
+| `axp` | 读 AXP2101 状态（电量、充电、各 LDO 使能） |
+| `lcd reinit\|softinit\|test\|sync\|gfx\|on\|off` | 屏幕诊断与黑屏救援 |
+| `pushfast on\|off` | 切换批量 `writePixels` 推屏（默认关，实测更慢） |
+
+---
+
+## 模拟器
+
+不想每次改 UI 都烧板子？`sim/` 里有一套 SDL 模拟器：把画布逻辑原样编译到桌面，一次跑完 20+ 个场景截图。
+
+```bash
+bash sim/build.sh     # 产物在 sim/out/*.png
+```
+
+`sim/build.sh` 用 `sim/stubs/` 里的桩替代 Arduino API，UI 像素级一致，可直接当文档配图（本 README 的截图就来自这里）。
 
 ---
 
 ## 目录结构
 
 ```
-gmeter-eva/
-├── platformio.ini
-├── README.md
-├── include/
-│   ├── pin_config.h      # 引脚定义（微雪官方）
-│   ├── config.h          # G值阈值 / 主题配色 / 枚举
-│   └── display.h         # 显示模块接口
-└── src/
-    ├── main.cpp          # 主程序：初始化、主循环、表情判定、UI 绘制
-    ├── display.cpp       # CO5300 QSPI + Canvas 双缓冲（接口见 include/display.h）
-    ├── imu.cpp/.h        # QMI8658 + G值计算 + 零偏校准 + 减速带检测
-    ├── touch.cpp/.h      # CST9220 + 滑动/点击手势
-    ├── audio.cpp/.h      # ES7210 音量/节拍检测
-    ├── es7210.cpp/.h     # ES7210 驱动（微雪官方示例，Espressif MIT）
-    └── audio_hal.h       # 音频 HAL 定义
+GValueMeter/
+├── GValueMeter.ino     # 状态机、按键、主循环、分带差分推屏、串口命令
+├── canvas_gfx.h        # PSRAM 画布 + 整屏/分带呈现
+├── panel_qspi.h/.cpp   # 自建 QSPI 推屏（仅诊断用，主路径不走它）
+├── gmeter.h/.cpp       # IMU 采样、轴向标定、峰值、颠簸检测
+├── mic_audio.h/.cpp    # ES7210 采集、FFT 频段、噪声门、唱歌判定
+├── spectrum.h/.cpp     # 频谱柱绘制
+├── pet_mode.h/.cpp     # 宠物表情与物理
+├── pro_mode.h/.cpp     # 专业模式（大数字 / 分量条 / 曲线 / 圆角报警）
+├── gg_mode.h/.cpp      # G-G 圆盘
+├── hud.h               # 绘图基元：七段数字、圆角框、圆环、气泡、曲线…
+├── pin_config.h        # 引脚、阈值、帧率等全部可调参数
+├── cjk_font.h/.cpp     # 中文子集字库（166 字，约 220KB）
+├── tools/              # 字库裁剪脚本
+├── sim/                # SDL 模拟器
+└── docs/               # README 用图（功能图 / 样机图 / 海报 / 截图）
 ```
 
-> 说明：`display.h` 位于 `include/`，`display.cpp` 位于 `src/`，PlatformIO 会自动处理头文件路径。
+> 根目录的 `src/` + `include/` + `platformio.ini` 是早期 PlatformIO 版本（带触摸、EVA 主题），保留作历史参考；**当前维护的是 `GValueMeter/` 这套按键版固件。**
+
+### 主要可调参数（`pin_config.h`）
+
+| 参数 | 含义 | 当前值 |
+|------|------|--------|
+| `DEF_LAT_AXIS` / `DEF_LON_AXIS` / `DEF_VERT_AXIS` + `*_SIGN` | 轴向与符号标定 | X / -Z / Y |
+| `HIGH_G_LIMIT` | 高 G 报警阈值 | 0.80 |
+| `PET_BUMP_P2P` / `PET_BUMP_CD_MS` | 颠簸触发峰值差 / 冷却 | 0.55 / 700ms |
+| `MIC_GAIN_DB` | ES7210 PGA 增益 | 14（≈42dB） |
+| `UI_FPS` / `UI_FPS_STANDBY` | 目标帧率 | 30 / 20 |
+| `BOOT_LONG_MS` | BOOT 长按判定 | 1500ms |
 
 ---
 
-## 可调参数（`include/config.h`）
+## 已知限制
 
-| 参数 | 含义 | 默认 |
-|------|------|------|
-| `BUMP_THRESHOLD` | 减速带触发阈值(g) | 0.35 |
-| `ACCEL_THRESHOLD` / `BRAKE_THRESHOLD` | 加/减速表情阈值(g) | ±0.12 |
-| `TURN_THRESHOLD` | 转弯表情阈值(g) | 0.10 |
-| `ALARM_G` | 红框报警阈值(g) | 0.8 |
-| `G_FILTER_ALPHA` | G值低通滤波系数 | 0.35 |
-| `G_HISTORY_LEN` | 曲线点数 | 120 |
-
-> 若滑动方向与预期相反，在 `src/main.cpp` 的 `onSwipe()` 中交换 `dir > 0` 对应的模式即可。
-
----
-
-## 坐标系
-
-`src/imu.cpp` 约定（屏幕朝向驾驶员安装）：
-- **X 轴**：侧向 G，正值 = 右转离心力
-- **Y 轴**：纵向 G，正值 = 加速
-- **Z 轴**：竖直，去除 1g 后用于减速带检测
-
-上电自动校准零偏，**校准时保持车辆静止**。安装方向不同可在 `imuUpdate()` 中调整轴映射/符号。
+- 帧率 9~12fps（受 QSPI 吞吐限制）。想再快只能做「只重绘局部矩形 + 只推局部区域」，目前还是整屏画布 + 分带推屏。
+- 关掉麦克风后频谱 / 唱歌没有输入；宠物模式的「听歌」必须处于测量状态。
+- 频谱噪声门阈值跟底噪估计联动，不同车内噪音水平下可能需要微调 `mic_audio.cpp` 里的 `th`。
+- 中文字库是子集（166 字），改文案后需要重跑字库工具，否则新字会显示空白。
 
 ---
 
 ## 致谢
-- ES7210 驱动来自微雪官方示例（Espressif MIT License）
-- 传感器/显示驱动：[SensorLib](https://github.com/lewisxhe/SensorLib)、[GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
-- 功能创意来自小红书 @飞翔的AMX 的 DIY 分享
+
+- 显示 / IMU / 音频驱动基础来自 [微雪官方示例](https://docs.waveshare.net/ESP32-S3-Touch-AMOLED-2.16/)（Espressif MIT License）
+- 图形库：[GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX)
+- 功能创意：小红书 @飞翔的AMX
+- 界面风格：EVA / NERV 配色（个人 DIY，非商业用途）
