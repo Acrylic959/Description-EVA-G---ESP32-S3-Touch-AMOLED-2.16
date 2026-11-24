@@ -3,12 +3,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Preferences.h>
-#include <SensorQMI8658.hpp>
+#include "qmi8658_min.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <math.h>
 
-static SensorQMI8658 s_imu;
 static Preferences   s_prefs;
 static portMUX_TYPE  s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -29,15 +28,8 @@ bool GMeter::begin() {
   _peak = s_prefs.getFloat("peak", 0.f);
 
   /* 板上 SA0 通常拉低 => 0x6A；个别批次为 0x6B，两个都试一次 */
-  _imuOk = s_imu.begin(Wire, 0x6A, IIC_SDA, IIC_SCL);
-  if (!_imuOk) _imuOk = s_imu.begin(Wire, 0x6B, IIC_SDA, IIC_SCL);
+  _imuOk = qmiBegin(IIC_SDA, IIC_SCL);
   if (!_imuOk) return false;
-
-  /* ±4g / 1000Hz / LPF0：量程够用，最高 ODR 便于抓颠簸 */
-  s_imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                            SensorQMI8658::ACC_ODR_1000Hz,
-                            SensorQMI8658::LPF_MODE_0);
-  s_imu.enableAccelerometer();
 
   _zeroReq = true;
   _calN = 0;
@@ -80,9 +72,9 @@ void GMeter::taskStep() {
 
   uint32_t now = millis();
 
-  if (!s_imu.getDataReady()) return;
+  if (!qmiDataReady()) return;
   float rx, ry, rz;
-  if (!s_imu.getAccelerometer(rx, ry, rz)) return;
+  if (!qmiReadAccelMG(rx, ry, rz)) return;
 
   /* ---- 1) 单位自适应：静止时 |a| 应≈1g（g 单位）或 ≈1000（mg 单位） ---- */
   if (!_unitKnown) {

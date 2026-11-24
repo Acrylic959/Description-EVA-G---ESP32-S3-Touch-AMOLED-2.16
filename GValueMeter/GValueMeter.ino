@@ -41,7 +41,7 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
 
 CanvasGFX canvas(LCD_WIDTH, LCD_HEIGHT);
-XPowersPMU power;
+XPowersAXP2101 power;
 GMeter gm;
 MicAudio mic;
 PetMode pet;
@@ -52,6 +52,7 @@ uint8_t  g_mode = 0;                 // 0 = 宠物, 1 = 专业, 2 = G-G 圆盘
 char     g_notice[40] = {0};
 uint32_t g_noticeUntil = 0;
 uint16_t g_fps = 0;
+static uint32_t g_drawUs = 0, g_pushUs = 0;   /* 每帧绘制 / 推屏耗时（微秒） */
 
 /* ------------------------------ 小工具 ------------------------------ */
 static void setNotice(const char *s, uint32_t ms = UI_NOTICE_MS) {
@@ -83,7 +84,7 @@ static void drawNotice(CanvasGFX *c, uint32_t now) {
 /* 开机 / 校准进度屏 */
 static void bootScreen(const char *line, float prog) {
   uiBoot(&canvas, line, prog);
-  canvasPresentAll(gfx, &canvas);
+  canvasPresentAllFast(gfx, bus, &canvas);
 }
 
 /* 校准时的进度浮层 */
@@ -113,9 +114,10 @@ static void printInfo() {
   int8_t ls;
   gm.getAxis(lat, lon, vert, ls);
   const char *nm[3] = {"X", "Y", "Z"};
-  Serial.printf("[INFO] axis lat=%s lon=%s%s vert=%s | peak=%.2f g | fps=%u | mic=%s\r\n",
+  Serial.printf("[INFO] axis lat=%s lon=%s%s vert=%s | peak=%.2f g | fps=%u | mic=%s | draw=%ums push=%ums\r\n",
                 nm[lat], (ls < 0 ? "-" : ""), nm[lon], nm[vert],
-                gm.peak(), g_fps, mic.ok() ? "ok" : "off");
+                gm.peak(), g_fps, mic.ok() ? "ok" : "off",
+                (unsigned)(g_drawUs / 1000), (unsigned)(g_pushUs / 1000));
 }
 
 static void execCmd(char *cmd) {
@@ -354,6 +356,7 @@ void loop() {
     AudioSnapshot a;
     mic.snapshot(a);
 
+    uint32_t tDraw = micros();
     if (g_mode == 0) {
       pet.update(g, a, dt);
       pet.draw(&canvas, g, a);
@@ -367,7 +370,10 @@ void loop() {
 
     drawCalOverlay(&canvas, g);
     drawNotice(&canvas, now);
-    canvasPresentAll(gfx, &canvas);
+    uint32_t tPush = micros();
+    g_drawUs = tPush - tDraw;
+    canvasPresentAllFast(gfx, bus, &canvas);
+    g_pushUs = micros() - tPush;
 
     frameCnt++;
     if (now - fpsT >= 1000) {
