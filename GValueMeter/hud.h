@@ -182,6 +182,19 @@ inline void hudRoundBorder(Arduino_GFX *d, int16_t x, int16_t y, int16_t w, int1
   hudArc(d, x0 + rr, y1 - rr, rr, rr, 1.5707963f, 3.14159f, 2.f, c);  /* 左下 */
 }
 
+/* 辉光边框：同一条路径向内叠 3 圈递减亮度，视觉上是"框 + 内发光"，
+ * 不是两条独立的框（用户明确不要双层框）。 */
+inline void hudGlowBorder(Arduino_GFX *d, int16_t x, int16_t y, int16_t w, int16_t h,
+                          int16_t r, uint16_t c, uint16_t bg, float a) {
+  if (a <= 0.f) return;
+  for (int i = 0; i < 3; i++) {
+    float f = a * (i == 0 ? 1.f : (i == 1 ? 0.38f : 0.15f));
+    hudRoundBorder(d, (int16_t)(x + i), (int16_t)(y + i),
+                   (int16_t)(w - 2 * i), (int16_t)(h - 2 * i),
+                   (int16_t)(r - i), fade565(c, bg, f));
+  }
+}
+
 inline void hudPanel(Arduino_GFX *d, int16_t x, int16_t y, int16_t w, int16_t h,
                      int16_t r, uint16_t fill, uint16_t border) {
   /* 逐行算圆角内缩，几何上精确：不会出现缺角/毛刺/虚线圈 */

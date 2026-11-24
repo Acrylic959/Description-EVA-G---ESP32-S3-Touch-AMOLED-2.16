@@ -32,6 +32,8 @@ inline uint16_t valueColor(float v) {
 }  // namespace
 
 void ProMode::reset() {
+  _needFull = true;
+  _alarmPrev = false;
   _bars[0] = _bars[1] = _bars[2] = 0.f;
   _magS = 0.f;
   _peakS = 0.f;
@@ -49,7 +51,16 @@ void ProMode::update(const GSnapshot &g, float dt) {
 
 /* ------------------------------------------------------------------ */
 void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
-  c->fillRect(0, 0, 480, 480, COL_PRO_BG);
+  bool alarmNow = (g.mag > HIGH_G_LIMIT);
+  /* 整屏填充要 21ms；日常只清两块"会变"的区域，省下的时间换成帧率 */
+  if (_needFull || alarmNow != _alarmPrev) {
+    c->fillRect(0, 0, 480, 480, COL_PRO_BG);
+    _needFull = false;
+  } else {
+    c->fillRect(40, 44, 400, 146, COL_PRO_BG);   /* 大数字 / 单位 G / 报警横幅 */
+    c->fillRect(0, 190, 480, 118, COL_PRO_BG);   /* 满量程标签 + 三条分量条 + 分隔线 */
+  }
+  _alarmPrev = alarmNow;
 
   drawHeader(c, g);
   drawBigValue(c, g);
@@ -63,25 +74,23 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
   drawChart(c, g);
 
-  /* 报警：横幅常亮（底色呼吸）+ 红框闪烁 */
-  if (g.mag > HIGH_G_LIMIT) {
-    bool on = ((millis() / 220) & 1);
-    uint16_t bg = on ? lerp565(COL_PRO_BG, COL_RED, 0.34f)
-                     : lerp565(COL_PRO_BG, COL_RED, 0.12f);
-    hudPanel(c, 150, 16, 180, 42, 12, bg, COL_RED);
-    hudCNC(c, 240, 21, 32, COL_RED, "高G报警");
-    drawAlarm(c, on);
+  /* 报警：横幅放在大数字与分量条之间（不压任何别的元素），红框走单层辉光 */
+  if (alarmNow) {
+    float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 和 G-G 页同一种平滑呼吸 */
+    drawAlarm(c, ph);
+    uint16_t bg = lerp565(COL_PRO_BG, COL_RED, 0.18f + 0.22f * ph);
+    hudPanel(c, 152, 150, 176, 34, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
+    hudGlowBorder(c, 152, 150, 176, 34, 14, COL_RED, bg, 0.18f + 0.30f * ph);
+    hudCNC(c, 240, 158, 24, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
   }
 }
 
 /* ------------------------------------------------------------------ */
 void ProMode::drawHeader(CanvasGFX *c, const GSnapshot &g) {
-  if (g.mag <= HIGH_G_LIMIT) hudCN(c, 30, 22, 24, COL_DIM, "G值表");
-  /* 电量：放在标题与"最大"之间，报警横幅出现时让位 */
-  if (g.mag <= HIGH_G_LIMIT && _batPct >= 0) drawBattery(c, 112, 25);
-
-  /* 高 G 报警时横幅占住表头，峰值读数让位（否则"最大"会被横幅压住） */
-  if (g.mag > HIGH_G_LIMIT) return;
+  (void)g;
+  hudCN(c, 30, 22, 24, COL_DIM, "G值表");
+  /* 电量：放在标题与"最大"之间 */
+  if (_batPct >= 0) drawBattery(c, 112, 25);
 
   char b[16];
   snprintf(b, sizeof(b), "%.2f", _peakS);
@@ -141,13 +150,13 @@ void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
   int16_t gw = hudCNW(16, "G");
   int16_t x = (int16_t)((480 - (w + 10 + gw)) / 2);
   _bigCx = (int16_t)(x + w / 2);
-  int16_t ty = (g.mag > HIGH_G_LIMIT) ? 70 : 64;   /* 报警横幅在上，数字让开一点 */
+  int16_t ty = 62;
   ssNumber(c, x, ty, H_, v, 2, on, off);
   hudCN(c, (int16_t)(x + w + 10), (int16_t)(ty + H_ / 2 - 8), 16, COL_TEXT, "G");
 }
 
 void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
-  hudCNR(c, 450, 196, 16, COL_DIM, "±1G 满量程");
+  hudCNR(c, 450, 170, 16, COL_DIM, "±1G 满量程");
 
   {
     /* 三条都按自己的绝对值取色：绿 → 青 → 琥珀 → 红，超过 0.8G 自然变红 */
@@ -204,7 +213,7 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
   int n = g.curveCount;
   int span = CH_X1 - CH_X0;
   if (n >= 2) {
-    for (int px = 0; px <= span; px++) {
+    for (int px = 0; px <= span; px += 2) {
       float t = (float)px * (float)(n - 1) / (float)span;
       int i0 = (int)t;
       if (i0 > n - 1) i0 = n - 1;
@@ -216,9 +225,9 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
       uint16_t col = valueColor(v);
       int16_t x = CH_X0 + px;
       if (CH_Y1 - y > 1) {
-        c->fillRect(x, y + 2, 1, CH_Y1 - y - 1, lerp565(COL_PRO_PANEL, col, 0.30f));
+        c->fillRect(x, y + 2, 2, CH_Y1 - y - 1, lerp565(COL_PRO_PANEL, col, 0.30f));
       }
-      c->fillRect(x, y, 1, 2, col);
+      c->fillRect(x, y, 2, 2, col);
     }
   }
 
@@ -237,6 +246,9 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
   }
 
   c->drawRect(CH_X0, CH_Y0, CH_X1 - CH_X0 + 1, CH_Y1 - CH_Y0 + 1, COL_PRO_GRID);
+  /* 面板外圈一圈极淡辉光，让曲线块从背景里浮出来 */
+  c->drawRect(CH_X0 - 1, CH_Y0 - 1, CH_X1 - CH_X0 + 3, CH_Y1 - CH_Y0 + 3,
+              fade565(COL_TEAL, COL_PRO_BG, 0.22f));
 
   int16_t ly = CH_Y1 + 6;              /* 图例压在安全线以内（y<450），不再被圆角切 */
   hudCN(c, CH_X0, ly, 16, COL_DIM, "-12秒");
@@ -251,11 +263,8 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
   hudCN(c, x2 + 17, ly, 16, COL_DIM, "最大");
 }
 
-void ProMode::drawAlarm(CanvasGFX *c, bool on) {
-  if (!on) return;
-  /* 圆角边框：屏是圆角屏（四角被切掉约 30px），直角框会在角上"戳出"屏幕，
-   * 这里按屏的圆角半径走圆角，外框 + 一圈更暗的内框做发光层次 */
-  /* 屏四角是圆弧（半径约 56px），边框必须内缩并同半径收圆，否则外角会被切掉 */
-  hudRoundBorder(c, 16, 16, 448, 448, 40, COL_RED);
-  hudRoundBorder(c, 24, 24, 432, 432, 32, fade565(COL_RED, COL_PRO_BG, 0.30f));
+void ProMode::drawAlarm(CanvasGFX *c, float ph) {
+  /* 屏四角是半径约 56px 的圆弧：框内缩 16、圆角 40 才不会被切。
+   * 只有一条框线，靠向内 3 圈递减做辉光（不再是外框 + 内框两层）。 */
+  hudGlowBorder(c, 16, 16, 448, 448, 40, COL_RED, COL_PRO_BG, 0.32f + 0.55f * ph);
 }

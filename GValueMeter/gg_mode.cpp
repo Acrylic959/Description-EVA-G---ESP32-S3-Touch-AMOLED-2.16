@@ -6,8 +6,8 @@
 /* 圆盘几何：中心和半径。边缘刚好 1.0G。
  * 上下各留 ~70px 给标题行 / 大号读数 / 四向峰值 / 底部三格。 */
 static const float GG_CX = 240.f;
-static const float GG_CY = 250.f;
-static const float GG_R  = 148.f;
+static const float GG_CY = 242.f;
+static const float GG_R  = 136.f;
 
 /* 安全边距：硬件圆角盖住屏幕四角，所有贴边文字向内缩 */
 static const int16_t SAFE_L = 36;
@@ -99,10 +99,10 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   hudCN(c, 300, 40, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
   /* ---- 四向峰值（取代原来的 刹车/加速/左转/右转 文字标签） ---- */
-  drawDirPeak(c, 211, 76, g.dirPeak[0], false);      /* 上：刹车峰值 */
-  drawDirPeak(c, 211, 402, g.dirPeak[1], false);     /* 下：加速峰值 */
-  drawDirPeak(c, (int16_t)(GG_CX - GG_R - 14), 242, g.dirPeak[2], true);   /* 左：左转峰值 */
-  drawDirPeak(c, (int16_t)(GG_CX + GG_R + 10), 242, g.dirPeak[3], false);  /* 右：右转峰值 */
+  drawDirPeak(c, 211, 72, g.dirPeak[0], false);      /* 上：刹车峰值 */
+  drawDirPeak(c, 211, 382, g.dirPeak[1], false);     /* 下：加速峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX - GG_R - 18), 232, g.dirPeak[2], true);   /* 左：左转峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX + GG_R + 12), 232, g.dirPeak[3], false);  /* 右：右转峰值 */
 
   /* ---- 圆盘：外圈 / 0.5G 圈 / 十字 / 对角 ---- */
   uint16_t ringCol = lerp565(COL_PRO_PANEL, COL_DIM, 0.95f);
@@ -172,26 +172,26 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   Axis axes[3] = {{"侧向", g.lat}, {"纵向", g.lon}, {"竖直", g.vert}};
   for (int i = 0; i < 3; i++) {
     int16_t bx = (int16_t)(SAFE_L + i * 138);
-    hudPanel(c, bx, 410, 132, 44, 12, RGB565(8, 11, 18),
+    hudPanel(c, bx, 408, 132, 42, 12, RGB565(8, 11, 18),
              lerp565(COL_PRO_PANEL, COL_DIM, 0.45f));
-    hudCN(c, bx + 10, 413, 16, COL_DIM, axes[i].name);
+    hudCN(c, bx + 10, 410, 16, COL_DIM, axes[i].name);
     char vb[16];
     snprintf(vb, sizeof(vb), "%+.2f", axes[i].v);
     uint16_t vc = ggAccent(fabsf(axes[i].v));
-    hudText(c, bx + 12, 432, 2, vc, vb);
+    hudText(c, bx + 12, 428, 2, vc, vb);
     int16_t wv = (int16_t)(strlen(vb) * 12);
-    hudCN(c, (int16_t)(bx + 18 + wv), 433, 16, lerp565(COL_DIM, vc, 0.5f), "G");
+    hudCN(c, (int16_t)(bx + 18 + wv), 429, 16, lerp565(COL_DIM, vc, 0.5f), "G");
   }
 
   /* ---- 报警：贴边红框闪 + 圆盘内一圈红色辉光（视频里那圈红光） ---- */
   if (alarm) {
     float ph = 0.5f + 0.5f * sinf(_t * 12.f);
-    hudRoundBorder(c, 16, 16, 448, 448, 40, fade565(COL_RED, KB, 0.25f + 0.65f * ph));
-    hudRoundBorder(c, 24, 24, 432, 432, 32, fade565(COL_RED, KB, 0.10f + 0.35f * ph));
+    hudGlowBorder(c, 16, 16, 448, 448, 40, COL_RED, KB, 0.30f + 0.62f * ph);
     /* 圆盘内侧一圈平滑红色辉光：逐半径降低透明度，不会出现"珠链" */
-    for (int k = 0; k <= 14; k++) {
-      float al = (0.55f * ph + 0.22f) * (1.f - (float)k / 15.f);
-      c->drawCircle((int16_t)GG_CX, (int16_t)GG_CY, (int16_t)(GG_R + k - 2), fade565(COL_RED, KB, al));
+    /* 辉光向圆盘内侧收，别往圆外溢——圆盘外侧还有四向峰值文字 */
+    for (int k = 0; k <= 12; k++) {
+      float al = (0.55f * ph + 0.22f) * (1.f - (float)k / 13.f);
+      c->drawCircle((int16_t)GG_CX, (int16_t)GG_CY, (int16_t)(GG_R - 2 - k), fade565(COL_RED, KB, al));
     }
   }
 }

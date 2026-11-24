@@ -184,7 +184,7 @@ static void drawNotice(CanvasGFX *c, uint32_t now) {
  * GFX 的 draw16bitRGBBitmap 是逐像素做 RGB565 转换后送 SPI，全屏 460KB 要 ~73ms；
  * 待机/宠物页大部分区域是静止的，按 24 行一条比对哈希，只推脏条，
  * 点到脸、顶部面板、通知时才多推几条，帧率能翻一截，画面也不会闪。 */
-#define PB_ROWS 48
+#define PB_ROWS 24
 #define PB_N    (LCD_HEIGHT / PB_ROWS)
 static uint32_t g_bandHash[PB_N];
 static bool     g_bandOk = false;
