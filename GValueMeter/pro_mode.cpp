@@ -54,39 +54,52 @@ void ProMode::update(const GSnapshot &g, float dt) {
 /* ------------------------------------------------------------------ */
 void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   bool alarmNow = (_alarmHold > 0.f);
-  /* 整屏填充要 21ms；日常只清两块"会变"的区域，省下的时间换成帧率 */
-  if (_needFull || alarmNow != _alarmPrev) {
+  bool chartDue = _needFull || (millis() - _chartMs > 90);   /* 曲线降到 ~8fps，别每帧整块重画 */
+
+  if (_needFull) {
     c->fillRect(0, 0, 480, 480, COL_PRO_BG);
+    /* 静态底图只在整屏重画时画一次：分隔线、曲线标题、面板外框都不再逐帧刷 */
+    c->fillRect(0, 182, 480, 1, COL_PRO_GRID);
+    hudCN(c, 30, 274, 22, COL_DIM, "G值曲线");
     _needFull = false;
+    _bannerOn = false;
+    _bigW = 0;
   } else {
-    c->fillRect(0, 0, 480, 46, COL_PRO_BG);      /* 表头：数字宽度会变，必须清，否则残影重叠 */
-    /* 连报警横幅那一段（到分隔线 182 之前）一起清掉：
-     原来只清到 y=142，横幅底部没清 → 报警消失后会留下残影 */
-    c->fillRect(0, 36, 480, 144, COL_PRO_BG);   /* 大数字 / 单位 G */
-    c->fillRect(0, 178, 480, 136, COL_PRO_BG);   /* 分隔线 + 标签 + 三条分量条 + 曲线标题 */
+    /* 逐帧只清"真的会变"的小块：
+     * 电量 / 最大值 / 大数字 / 报警横幅 / 三条分量条 —— 静态文字一律不动 */
+    c->fillRect(104, 20, 44, 26, COL_PRO_BG);          /* 电池图标 */
+    c->fillRect(360, 14, 108, 38, COL_PRO_BG);         /* "最大" + 数值 */
+    c->fillRect(96, 42, 300, 92, COL_PRO_BG);          /* 七段大数字 + 单位 G */
+    if (_bannerOn || alarmNow) c->fillRect(150, 128, 180, 44, COL_PRO_BG);
+    for (int i = 0; i < 3; i++) {
+      int16_t y = 200 + i * 24;
+      c->fillRect(0, y - 2, 480, BAR_H + 4, COL_PRO_BG);  /* 标签 + 数值 + 条 */
+    }
   }
-  _alarmPrev = alarmNow;
 
   drawHeader(c, g);
   drawBigValue(c, g);
 
-  /* 分隔线 */
-  c->fillRect(0, 182, 480, 1, COL_PRO_GRID);
+  if (chartDue) {
+    drawChart(c, g);
+    _chartMs = millis();
+  } else {
+    /* 曲线标题是静态的，但图例/时间轴在 drawChart 里，这里不用补 */
+  }
 
   drawBars(c, g);
 
-  hudCN(c, 30, 274, 22, COL_DIM, "G值曲线");
-
-  drawChart(c, g);
-
-  /* 报警：横幅放在大数字与分量条之间（不压任何别的元素），红框走单层辉光 */
+  /* 报警横幅：单层辉光，位置避开数字和"±1G 满量程" */
   if (alarmNow) {
-    float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 平滑呼吸（原来那条整屏红框已按反馈删除） */
+    float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);
     uint16_t bg = lerp565(COL_PRO_BG, COL_RED, 0.18f + 0.22f * ph);
     hudPanel(c, 158, 136, 164, 30, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
     hudGlowBorder(c, 158, 136, 164, 30, 14, COL_RED, bg, 0.18f + 0.30f * ph);
-    hudCNC(c, 240, 143, 22, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
+    hudCNC(c, 244, 142, 21, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
   }
+
+  _bannerOn = alarmNow;
+  _alarmPrev = alarmNow;
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,6 +169,7 @@ void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
   _bigCx = (int16_t)(x + w / 2);
   int16_t ty = 52;
   ssNumber(c, x, ty, H_, v, 2, on, off);
+  _bigX = x; _bigY = ty; _bigW = w; _bigH = H_;
   hudCN(c, (int16_t)(x + w + 10), (int16_t)(ty + H_ / 2 - 8), 16, COL_TEXT, "G");
 }
 

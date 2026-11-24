@@ -818,6 +818,10 @@ void loop() {
     }
 
     if (!g_measuring && g_mode != 0 && !g_spec) uiStandbyHint(&canvas, now * 0.001f);
+    /* 校准浮层（底部黄色进度框）消失后必须整页重画，否则会留在屏幕上 */
+    static bool calPrev = false;
+    if (calPrev && !g.calibrating) pro.requestFull();
+    calPrev = g.calibrating;
     drawCalOverlay(&canvas, g);
     drawNotice(&canvas, now);
     uint32_t tPush = micros();

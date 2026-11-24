@@ -16,6 +16,8 @@ class ProMode {
   /* 电量：pct < 0 表示读不到（此时不画），chg = 正在充电 */
   void setBattery(int pct, bool chg) { _batPct = pct; _batChg = chg; }
   void draw(CanvasGFX *cv, const GSnapshot &g);
+  /* 外部有浮层(校准进度等)盖过本页时调用：下一帧整屏重画，避免残留 */
+  void requestFull() { _needFull = true; }
 
  private:
   void drawHeader(CanvasGFX *c, const GSnapshot &g);
@@ -33,5 +35,8 @@ class ProMode {
   int16_t _bigCx = 232;   /* 大号数字的水平中心，说明文字跟着它对齐 */
   bool _needFull = true;  /* 下一帧整屏重画（切页 / 报警状态变化时置位） */
   bool _alarmPrev = false;
+  int16_t _bigX = 0, _bigY = 0, _bigW = 0, _bigH = 0;   /* 上一帧大数字的包围盒 */
+  bool _bannerOn = false;
+  uint32_t _chartMs = 0;                                /* 曲线重绘节流 */
   float _alarmHold = 0.f;   /* 报警保持：跨过 0.80G 后继续亮 0.45s，防止阈值抖动 */
 };

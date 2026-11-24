@@ -249,42 +249,34 @@ static void computeSpectrum() {
     s_bIdx = (s_bIdx + 1) % NF_SPEC_WIN;
   }
 
-  /* 噪声门（dB 域）：底噪 +6dB 以下一律按 0。车里胎噪/风噪 60~70dB 的底子
-   * 直接被门挡住，只有真正高出一截的音乐才会让柱子动 */
-  float span = 22.0f;                            /* 门限 +22dB 到满格 */
-  for (int b = 0; b < AUDIO_BANDS; b++) {
-    float v = (v0[b] - (s_bFloor[b] + 10.0f)) * (1.f / span);  /* 要比自己那段底噪高 10dB 才起步 */
-    if (v < 0.f) v = 0.f;
-    if (v < 0.08f) v = 0.f;                      /* 死区：底噪上下抖动不出柱 */
-    if (v > 1.f) v = 1.f;
-    v0[b] = v;
-    if (v > vmax) vmax = v;
-  }
-
-  /* 自动增益：只有"确实有内容"（最响的段超出自己底噪 12dB 以上）才抬增益，
-   * 纯底噪一律 gain=1，安静环境下不会把残留噪声放大成柱子 */
+  /* 逐段 SNR（相对本段底噪），并找最响的一段 */
+  float snrB[AUDIO_BANDS];
   float maxSnr = -999.f;
   for (int b = 0; b < AUDIO_BANDS; b++) {
-    float snrb = v0[b] - s_bFloor[b];
-    if (snrb > maxSnr) maxSnr = snrb;
+    snrB[b] = v0[b] - s_bFloor[b];
+    if (snrB[b] > maxSnr) maxSnr = snrB[b];
   }
-  if (maxSnr > 12.f) {
-    if (vmax > s_agc) s_agc += (vmax - s_agc) * 0.50f;
-    else              s_agc += (vmax - s_agc) * 0.05f;
-  } else {
-    s_agc = 0.f;
-  }
-  float gain = 1.f;
-  if (s_agc > 0.28f) gain = 0.95f / s_agc;
-  if (gain < 1.f) gain = 1.f;
-  if (gain > 2.5f) gain = 2.5f;                 /* 别把残留底噪也放大成柱子 */
+
+  /* "满格"对应的 SNR 自适应：跟住最近的音乐响度（抬得快、落得慢）。
+   * 关键点：满格按 1.18 倍留余量，最响的那段也只到 ~0.85，
+   * 一般车内音量（70~85dB 播放）不会一路顶到上限。 */
+  static float s_ceil = 22.f;
+  if (maxSnr > s_ceil) s_ceil += (maxSnr - s_ceil) * 0.06f;
+  else                 s_ceil += (maxSnr - s_ceil) * 0.004f;
+  if (s_ceil < 18.f) s_ceil = 18.f;
+  if (s_ceil > 46.f) s_ceil = 46.f;
+
+  const float startSnr = 8.f;                    /* 高出本段底噪 8dB 才起步 */
+  float denom = (s_ceil - startSnr) * 1.18f;
+  if (denom < 8.f) denom = 8.f;
 
   for (int b = 0; b < AUDIO_BANDS; b++) {
-    float v = v0[b] * gain;
+    float v = (snrB[b] - startSnr) * (1.f / denom);
+    if (v < 0.08f) v = 0.f;                      /* 死区：底噪抖动不出柱 */
     if (v > 1.f) v = 1.f;
     float old = s_bands[b];
     /* 起音快、回落更慢：柱形平滑，不会一抖一抖 */
-    s_bands[b] = (v > old) ? (old + (v - old) * 0.55f) : (old + (v - old) * 0.085f);
+    s_bands[b] = (v > old) ? (old + (v - old) * 0.45f) : (old + (v - old) * 0.075f);
     float pk = s_pk[b];
     if (v > pk) s_pk[b] = v;
     else { pk -= 0.012f; s_pk[b] = pk > 0.f ? pk : 0.f; }
@@ -295,8 +287,8 @@ static void computeSpectrum() {
   if (++dbg >= 30) {
     dbg = 0;
     float barSum = 0.f; for (int b = 0; b < AUDIO_BANDS; b++) barSum += s_bands[b];
-    Serial.printf("[SPEC] dbmax=%.1f b0floor=%.1f midfloor=%.1f gain=%.2f bar=%.2f\r\n",
-                  dbmax, s_bFloor[0], s_midFloorDb, gain, barSum);
+    Serial.printf("[SPEC] dbmax=%.1f b0floor=%.1f mid=%.1f ceil=%.1f bar=%.2f\r\n",
+                  dbmax, s_bFloor[0], s_midFloorDb, s_ceil, barSum);
   }
 }
 
