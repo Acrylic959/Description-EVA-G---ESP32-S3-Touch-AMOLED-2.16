@@ -51,11 +51,6 @@ void ProMode::update(const GSnapshot &g, float dt) {
 void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   c->fillRect(0, 0, 480, 480, COL_PRO_BG);
 
-  /* 顶部渐变亮线 */
-  for (int16_t x = 0; x < 480; x += 3) {
-    c->fillRect(x, 0, 3, 2, lerp565(COL_TEAL, COL_VIOLET, (float)x / 480.f));
-  }
-
   drawHeader(c, g);
   drawBigValue(c, g);
 
@@ -260,6 +255,7 @@ void ProMode::drawAlarm(CanvasGFX *c, bool on) {
   if (!on) return;
   /* 圆角边框：屏是圆角屏（四角被切掉约 30px），直角框会在角上"戳出"屏幕，
    * 这里按屏的圆角半径走圆角，外框 + 一圈更暗的内框做发光层次 */
-  hudRoundBorder(c, 6, 6, 468, 468, 34, COL_RED);
-  hudRoundBorder(c, 13, 13, 454, 454, 28, fade565(COL_RED, COL_PRO_BG, 0.30f));
+  /* 屏四角是圆弧（半径约 56px），边框必须内缩并同半径收圆，否则外角会被切掉 */
+  hudRoundBorder(c, 16, 16, 448, 448, 40, COL_RED);
+  hudRoundBorder(c, 24, 24, 432, 432, 32, fade565(COL_RED, COL_PRO_BG, 0.30f));
 }

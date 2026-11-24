@@ -84,17 +84,14 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   bool alarm = (g.mag > HIGH_G_LIMIT);
   uint16_t accent = ggAccent(g.mag);
 
-  /* 屏边一圈极淡的绿光，和宠物页保持同一套底子 */
-  hudRing(c, 240.f, 240.f, 238.f, 238.f, 2.f, fade565(COL_GREEN, KB, alarm ? 0.04f : 0.10f));
-
   /* ---- 顶部：标题 / 历史最大（左右各内缩 36px，避开硬件圆角） ---- */
-  hudCN(c, SAFE_L, 10, 24, lerp565(COL_DIM, COL_GREEN, 0.25f), "G-G 圆盘");
+  hudCN(c, SAFE_L, 26, 24, lerp565(COL_DIM, COL_GREEN, 0.25f), "G-G 圆盘");
   char buf[24];
   snprintf(buf, sizeof(buf), "%.2f", g.peak);
   int16_t vw = (int16_t)(strlen(buf) * 12);            /* size2 每字符 12px */
-  hudCN(c, (int16_t)(SAFE_R - 16), 16, 16, lerp565(COL_DIM, COL_AMBER, 0.4f), "G");
-  hudTextR(c, (int16_t)(SAFE_R - 20), 16, 2, COL_AMBER, buf);
-  hudCNR(c, (int16_t)(SAFE_R - 20 - vw - 12), 17, 16, COL_DIM, "最大");
+  hudCN(c, (int16_t)(SAFE_R - 16), 32, 16, lerp565(COL_DIM, COL_AMBER, 0.4f), "G");
+  hudTextR(c, (int16_t)(SAFE_R - 20), 32, 2, COL_AMBER, buf);
+  hudCNR(c, (int16_t)(SAFE_R - 20 - vw - 12), 33, 16, COL_DIM, "最大");
 
   /* ---- 当前合成 G：大号读数 ---- */
   snprintf(buf, sizeof(buf), "%.2f", g.mag);
@@ -175,22 +172,22 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   Axis axes[3] = {{"侧向", g.lat}, {"纵向", g.lon}, {"竖直", g.vert}};
   for (int i = 0; i < 3; i++) {
     int16_t bx = (int16_t)(SAFE_L + i * 138);
-    hudPanel(c, bx, 428, 132, 46, 12, RGB565(8, 11, 18),
+    hudPanel(c, bx, 410, 132, 44, 12, RGB565(8, 11, 18),
              lerp565(COL_PRO_PANEL, COL_DIM, 0.45f));
-    hudCN(c, bx + 10, 430, 16, COL_DIM, axes[i].name);
+    hudCN(c, bx + 10, 413, 16, COL_DIM, axes[i].name);
     char vb[16];
     snprintf(vb, sizeof(vb), "%+.2f", axes[i].v);
     uint16_t vc = ggAccent(fabsf(axes[i].v));
-    hudText(c, bx + 12, 450, 2, vc, vb);
+    hudText(c, bx + 12, 432, 2, vc, vb);
     int16_t wv = (int16_t)(strlen(vb) * 12);
-    hudCN(c, (int16_t)(bx + 18 + wv), 451, 16, lerp565(COL_DIM, vc, 0.5f), "G");
+    hudCN(c, (int16_t)(bx + 18 + wv), 433, 16, lerp565(COL_DIM, vc, 0.5f), "G");
   }
 
   /* ---- 报警：贴边红框闪 + 圆盘内一圈红色辉光（视频里那圈红光） ---- */
   if (alarm) {
     float ph = 0.5f + 0.5f * sinf(_t * 12.f);
-    hudRoundBorder(c, 3, 3, 474, 474, 26, fade565(COL_RED, KB, 0.25f + 0.65f * ph));
-    hudRoundBorder(c, 8, 8, 464, 464, 22, fade565(COL_RED, KB, 0.10f + 0.35f * ph));
+    hudRoundBorder(c, 16, 16, 448, 448, 40, fade565(COL_RED, KB, 0.25f + 0.65f * ph));
+    hudRoundBorder(c, 24, 24, 432, 432, 32, fade565(COL_RED, KB, 0.10f + 0.35f * ph));
     /* 圆盘内侧一圈平滑红色辉光：逐半径降低透明度，不会出现"珠链" */
     for (int k = 0; k <= 14; k++) {
       float al = (0.55f * ph + 0.22f) * (1.f - (float)k / 15.f);
