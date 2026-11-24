@@ -54,7 +54,7 @@ void ProMode::update(const GSnapshot &g, float dt) {
 /* ------------------------------------------------------------------ */
 void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   bool alarmNow = (_alarmHold > 0.f);
-  bool chartDue = _needFull || (millis() - _chartMs > 90);   /* 曲线降到 ~8fps，别每帧整块重画 */
+  bool chartDue = _needFull || (millis() - _chartMs > 150);   /* 曲线降到 ~8fps，别每帧整块重画 */
 
   if (_needFull) {
     c->fillRect(0, 0, 480, 480, COL_PRO_BG);

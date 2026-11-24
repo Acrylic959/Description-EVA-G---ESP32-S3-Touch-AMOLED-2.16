@@ -137,11 +137,14 @@ static void syncMicActive() {
   mic.setActive(need);
 }
 
+static void requestFullPush();   /* 下一帧整屏重推（切页后用） */
+
 /* 三页循环：0 宠物 → 1 专业 → 2 G-G 圆盘 → 0 */
 static void applyMode(uint8_t m, bool announce = true) {
   g_mode = (uint8_t)(m % 3);
   /* 模式切换不再弹提示框：切页本身就是反馈，浮层还会挡住内容 */
   (void)announce;
+  requestFullPush();          /* 切页后整屏重推一次，面板不会残留上一页 */
   if (g_mode == 0) {
     pet.reset();
   } else if (g_mode == 1) {
@@ -183,7 +186,7 @@ static void drawNotice(CanvasGFX *c, uint32_t now) {
  * GFX 的 draw16bitRGBBitmap 是逐像素做 RGB565 转换后送 SPI，全屏 460KB 要 ~73ms；
  * 待机/宠物页大部分区域是静止的，按 24 行一条比对哈希，只推脏条，
  * 点到脸、顶部面板、通知时才多推几条，帧率能翻一截，画面也不会闪。 */
-#define PB_ROWS 24
+#define PB_ROWS 48   /* 10 条带：窗口切换少一半，局部刷新更稳 */
 #define PB_N    (LCD_HEIGHT / PB_ROWS)
 static uint32_t g_bandHash[PB_N];
 static bool     g_bandOk = false;
@@ -214,6 +217,8 @@ static void pushBand(uint16_t *buf, int b0, int b1) {
   bus->writePixels(buf + (size_t)y * LCD_WIDTH, (uint32_t)LCD_WIDTH * h);
   gfx->endWrite();
 }
+
+static void requestFullPush() { g_pushAll = true; }
 
 static void pushDirty(uint16_t *buf) {
   const int words = LCD_WIDTH * PB_ROWS / 2;
@@ -717,8 +722,9 @@ void setup() {
     while (true) delay(200);
   }
   bufA = canvas.buffer();
-  bufB = canvas.allocExtra();              /* 第二块：推屏与绘制重叠 */
-  if (!bufB) Serial.println("[MEM] 第二块帧缓冲分配失败，退化为单缓冲");
+  /* 单缓冲：GFX 的 draw16bitRGBBitmap 是同步的（送完才返回），推屏期间不会绘制，
+   * 不需要第二块。双缓冲反而让"局部刷新"的页面在两块缓冲之间来回跳 → 闪屏/残影。 */
+  bufB = nullptr;
 
 #ifndef GVM_PUSH_GFX
   panelAsyncBegin();                       /* 在 GFX 初始化好的 SPI2 上挂异步设备（GFX 推屏模式下不需要） */
