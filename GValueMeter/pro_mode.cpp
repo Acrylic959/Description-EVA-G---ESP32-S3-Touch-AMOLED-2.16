@@ -84,12 +84,52 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 /* ------------------------------------------------------------------ */
 void ProMode::drawHeader(CanvasGFX *c, const GSnapshot &g) {
   if (g.mag <= HIGH_G_LIMIT) hudCN(c, 36, 10, 24, COL_DIM, "G值表");
+  /* 电量：放在标题与"最大"之间，报警横幅出现时让位 */
+  if (g.mag <= HIGH_G_LIMIT && _batPct >= 0) drawBattery(c, 122, 13);
 
   char b[16];
   snprintf(b, sizeof(b), "%.2f", _peakS);
   int16_t pw = hudTextW(3, b);
   hudTextR(c, 444, 12, 3, COL_AMBER, b);
   hudCNR(c, 444 - pw - 10, 12, 24, lerp565(COL_DIM, COL_AMBER, 0.35f), "最大");
+}
+
+/* 电池图标 + 百分比：绿 >50% / 琥珀 20~50% / 红 <20%（充电时青色 + 闪电） */
+void ProMode::drawBattery(CanvasGFX *c, int16_t x, int16_t y) {
+  const int16_t bw = 22, bh = 13;
+  int pct = _batPct;
+  if (pct > 100) pct = 100;
+  if (pct < 0)   pct = 0;
+
+  uint16_t col = (pct >= 50) ? COL_GREEN : (pct >= 20 ? COL_AMBER : COL_RED);
+  if (_batChg) col = COL_TEAL;
+  uint16_t shell = lerp565(COL_PRO_BG, COL_DIM, 0.85f);   /* 外壳用暗灰绿，和电量条分得开 */
+
+  /* 外壳（1px 描边）+ 右侧正极小尾巴 */
+  c->fillRect(x, y, bw, bh, shell);
+  c->fillRect(x + 1, y + 1, bw - 2, bh - 2, COL_PRO_BG);
+  c->fillRect(x + bw, y + 4, 2, bh - 8, shell);
+
+  /* 电量条：内区 (bw-4)×(bh-4)，贴左生长，剩 1px 缝隙 */
+  int16_t iw = bw - 4, ih = bh - 4;
+  int16_t fw = (int16_t)((iw * pct + 50) / 100);
+  if (pct > 0 && fw < 1) fw = 1;
+  if (fw > 0) c->fillRect(x + 2, y + 2, fw, ih, col);
+
+  /* 充电：叠一个闪电 */
+  if (_batChg) {
+    int16_t mx = x + bw / 2, my = y + 1;
+    c->fillRect(mx - 3, my + 2, 7, 4, COL_PRO_BG);
+    c->fillRect(mx - 1, my + 5, 6, 3, COL_PRO_BG);
+    c->fillRect(mx + 1, my + 8, 4, 3, COL_PRO_BG);
+    hudCapsule(c, (float)(mx + 2), (float)(my + 1), (float)(mx - 2), (float)(my + 6), 2.f, COL_TEXT);
+    hudCapsule(c, (float)(mx - 2), (float)(my + 6), (float)(mx + 1), (float)(my + 11), 2.f, COL_TEXT);
+  }
+
+  /* 百分比 */
+  char b[8];
+  snprintf(b, sizeof(b), "%d%%", pct);
+  hudText(c, x + bw + 7, y + 1, 2, col, b);
 }
 
 void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {

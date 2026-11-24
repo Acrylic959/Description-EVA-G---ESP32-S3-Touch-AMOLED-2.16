@@ -275,13 +275,21 @@ int main(int argc, char **argv) {
     canvasPresentAll(&gfx, &canvas);
     { char p[256]; snprintf(p, sizeof(p), "%s/00-standby-pet.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
     pro.reset();
+    pro.setBattery(82, false);
     pro.draw(&canvas, g0);
     uiStandbyHint(&canvas, 1.3f);
     canvasPresentAll(&gfx, &canvas);
     { char p[256]; snprintf(p, sizeof(p), "%s/00-standby-pro.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
+    pet.setHideG(true);
+    pet.draw(&canvas, g0, a0);
+    canvasPresentAll(&gfx, &canvas);
+    { char p[256]; snprintf(p, sizeof(p), "%s/00-pet-nogv.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
+    pet.setHideG(false);
     pet.setStandby(false);
-    printf("[CAP] 待机态 2 张\n");
+    printf("[CAP] 待机态 3 张\n");
   }
+
+  pro.setBattery(82, false);      /* 模拟器里固定一个电量，方便看排版 */
 
   int nextCap = 0;
   double nextRender = 0.0;

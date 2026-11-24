@@ -13,10 +13,13 @@ class ProMode {
  public:
   void reset();
   void update(const GSnapshot &g, float dt);
+  /* 电量：pct < 0 表示读不到（此时不画），chg = 正在充电 */
+  void setBattery(int pct, bool chg) { _batPct = pct; _batChg = chg; }
   void draw(CanvasGFX *cv, const GSnapshot &g);
 
  private:
   void drawHeader(CanvasGFX *c, const GSnapshot &g);
+  void drawBattery(CanvasGFX *c, int16_t x, int16_t y);
   void drawBigValue(CanvasGFX *c, const GSnapshot &g);
   void drawAxisBar(CanvasGFX *c, int16_t y, const char *label, float v, uint16_t col);
   void drawBars(CanvasGFX *c, const GSnapshot &g);
@@ -26,5 +29,7 @@ class ProMode {
   float _bars[3] = {0, 0, 0};
   float _magS = 0.f;
   float _peakS = 0.f;
+  int _batPct = -1;
+  bool _batChg = false;
   int16_t _bigCx = 232;   /* 大号数字的水平中心，说明文字跟着它对齐 */
 };

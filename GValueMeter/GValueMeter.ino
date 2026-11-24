@@ -17,7 +17,7 @@
  *
  *  按键：
  *    BOOT 长按 1.5s   开测 / 停测（开测时自动重新取重力零点、清本次峰值）
- *    BOOT 短按        测量中 = 重新取水平零点（车身装歪、换角度后用）
+ *    BOOT 短按        宠物页 = 隐藏 / 显示 G 值（干净的脸）；其他页测量中 = 重新取水平零点
  *    侧面键短按       切换界面
  *    侧面键双击       清除峰值
  *    侧面键长按 1.2s  重新取重力零点
@@ -42,6 +42,7 @@
 #include "pro_mode.h"
 #include "gg_mode.h"
 #include "panel_qspi.h"
+#include <Preferences.h>
 
 /* ------------------------------ 全局对象 ------------------------------ */
 /* is_shared_interface = true：GFX 只在初始化 / 调亮度时短暂持有总线锁，
@@ -63,6 +64,10 @@ GgMode  gg;
 
 uint8_t  g_mode = 0;                 // 0 = 宠物, 1 = 专业, 2 = G-G 圆盘
 bool     g_measuring = false;        // 上电待机，长按 BOOT 开测
+bool     g_hideG = false;            // 宠物页：单击 BOOT 隐藏 / 显示 G 值（存 NVS）
+bool     g_pmuOk = false;
+int      g_battPct = -1;             // -1 = 读不到
+bool     g_battChg = false;
 char     g_notice[40] = {0};
 uint32_t g_noticeUntil = 0;
 uint16_t g_fps = 0;
@@ -113,6 +118,8 @@ static void pushFrameAsync(uint16_t *buf) {
 static volatile bool g_imuResync = false;
 
 /* ------------------------------ 小工具 ------------------------------ */
+static void saveHideG();
+
 static void setNotice(const char *s, uint32_t ms = UI_NOTICE_MS) {
   strncpy(g_notice, s, sizeof(g_notice) - 1);
   g_notice[sizeof(g_notice) - 1] = 0;
@@ -215,6 +222,8 @@ static void printInfo() {
                 gm.peak(), g.dirPeak[0], g.dirPeak[1], g.dirPeak[2], g.dirPeak[3],
                 g_fps, (unsigned)(g_drawUs / 1000), (unsigned)(g_waitUs / 1000),
                 (unsigned)(g_dmaUs / 1000), mic.ok() ? "ok" : "off");
+  Serial.printf("[BAT] %d%%%s | petG=%s\r\n", g_battPct, g_battChg ? " charging" : "",
+                g_hideG ? "hidden" : "shown");
   Serial.printf("[PERF] period=%ums | push=%ums fill=%ums queue=%ums flush=%ums | %s\r\n",
                 (unsigned)(g_perUs / 1000),
                 (unsigned)(panelPushUs() / 1000), (unsigned)(panelFillUs() / 1000),
@@ -239,6 +248,16 @@ static void execCmd(char *cmd) {
     return;
   }
   if (!strncmp(cmd, "info", 4)) { printInfo(); return; }
+  if (!strncmp(cmd, "g", 1) && (cmd[1] == 0 || cmd[1] == '=')) {
+    if (!strncmp(cmd + 1, "=hide", 5))      g_hideG = true;
+    else if (!strncmp(cmd + 1, "=show", 5)) g_hideG = false;
+    else                                    g_hideG = !g_hideG;
+    pet.setHideG(g_hideG);
+    saveHideG();
+    setNotice(g_hideG ? "已隐藏G值" : "已显示G值", 1600);
+    Serial.printf("[CMD] pet G values: %s\r\n", g_hideG ? "hidden" : "shown");
+    return;
+  }
   if (!strncmp(cmd, "bench", 5)) {
     waitPushIdle();
     uint32_t t0 = micros();
@@ -256,7 +275,7 @@ static void execCmd(char *cmd) {
     return;
   }
   if (!strncmp(cmd, "help", 4) || cmd[0] == '?') {
-    Serial.println("cal | start | stop | reset | info | mode pet|pro|gg | bright=0..255 | axis lat=x lon=-z vert=y");
+    Serial.println("cal | start | stop | reset | info | bench | g[=hide|show] | mode pet|pro|gg | bright=0..255 | axis lat=-x lon=-z vert=y");
     return;
   }
   if (!strncmp(cmd, "mode", 4)) {
@@ -312,6 +331,14 @@ static void handleSerial() {
   }
 }
 
+/* -------------------- 宠物页 G 值显示开关（存 NVS，重启后保持） -------------------- */
+static void saveHideG() {
+  Preferences p;
+  p.begin("gmeter", false);
+  p.putBool("hideg", g_hideG);
+  p.end();
+}
+
 /* ------------------------- BOOT 键：长按开测 / 短按取零点 ------------------------- */
 static void updateBootKey(uint32_t now) {
   static bool down = false, longDone = false;
@@ -329,7 +356,13 @@ static void updateBootKey(uint32_t now) {
   } else if (!raw && down) {
     down = false;
     if (!longDone && (now - downMs) >= 120) {      /* 防抖：短促误触不算 */
-      if (g_measuring) {
+      if (g_mode == 0) {                            /* 宠物页：隐藏 / 显示 G 值 */
+        g_hideG = !g_hideG;
+        pet.setHideG(g_hideG);
+        saveHideG();
+        setNotice(g_hideG ? "已隐藏G值" : "已显示G值", 1600);
+        Serial.printf("[KEY] %s\r\n", g_hideG ? "hide G" : "show G");
+      } else if (g_measuring) {
         gm.requestZero();
         setNotice("重新校准水平，请保持静止", 2200);
         Serial.println("[BOOT] 水平零点重取");
@@ -410,9 +443,14 @@ void setup() {
   Wire.begin(IIC_SDA, IIC_SCL, 400000);
 
   /* PMU：板上 ALDO/BLDO 默认已给屏、传感器供电，这里只做状态监测 */
-  if (power.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+  g_pmuOk = power.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+  if (g_pmuOk) {
     power.enableBattDetection();
     power.enableBattVoltageMeasure();
+    g_battPct = power.getBatteryPercent();
+    g_battChg = power.isCharging();
+    pro.setBattery(g_battPct, g_battChg);
+    Serial.printf("[PMU] AXP2101 ok, battery=%d%% %s\r\n", g_battPct, g_battChg ? "(charging)" : "");
   } else {
     Serial.println("[PMU] AXP2101 未找到（屏幕仍可用）");
   }
@@ -460,6 +498,8 @@ void setup() {
   gm.setActive(false);
   mic.setActive(false);
   pet.setStandby(true);
+  { Preferences p; p.begin("gmeter", true); g_hideG = p.getBool("hideg", false); p.end(); }
+  pet.setHideG(g_hideG);
 
   bootScreen("就绪 · 长按 BOOT 开测", 1.0f);
   delay(300);
@@ -469,7 +509,7 @@ void setup() {
   gg.reset();
   setNotice("侧面键短按切换界面", 2000);
   Serial.println("[BOOT] G-Meter ready (待机). 输入 help 查看串口命令");
-  Serial.println("[BOOT] BOOT长按1.5s=开测/停测 BOOT短按=重置水平 | 侧面键短按=翻页 双击=清峰值 长按1.2s=取零点");
+  Serial.println("[BOOT] BOOT长按1.5s=开测/停测 BOOT短按=宠物页隐藏/显示G值(其他页=重启水平零点) | 侧面键短按=翻页 双击=清峰值 长按1.2s=取零点");
 }
 
 /* ------------------------------ loop ------------------------------ */
@@ -532,6 +572,15 @@ void loop() {
       frameCnt = 0;
       fpsT = now;
     }
+  }
+
+  /* 每秒读一次电量（I2C 只读两个寄存器，不影响帧率） */
+  static uint32_t lastBat = 0;
+  if (g_pmuOk && now - lastBat >= 1000) {
+    lastBat = now;
+    g_battPct = power.getBatteryPercent();
+    g_battChg = power.isCharging();
+    pro.setBattery(g_battPct, g_battChg);
   }
 
   /* 每秒打印一次运行状态（串口监视器可直接看 G 值、帧率与耗时） */

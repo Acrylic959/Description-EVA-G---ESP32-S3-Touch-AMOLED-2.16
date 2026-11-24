@@ -199,6 +199,9 @@ void PetMode::drawBackground(CanvasGFX *c) {
 
 /* --------------------- 顶部：当前 / 最大 + 二维气泡 --------------------- */
 void PetMode::drawTopBar(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &a) {
+  /* 用户单击按键隐藏 G 值时：整块顶部面板与二维气泡都不画，只留一张干净的脸 */
+  if (_hideG) return;
+
   uint16_t accent = gAccent(g.mag);
 
   hudPanel(c, 86, 12, 258, 70, 20, RGB565(8, 11, 18),
