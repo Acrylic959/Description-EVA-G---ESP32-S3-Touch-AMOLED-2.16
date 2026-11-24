@@ -36,7 +36,7 @@
 
 #define ES7210_ADDR   0x40
 #define MIC_SAMPLE_RATE 16000
-#define MIC_GAIN_DB      8   // ES7210 PGA 档位：0=0dB 每档 3dB，8 ≈ 24dB
+#define MIC_GAIN_DB      14  // ES7210 PGA 档位：0=0dB 每档 3dB，14 = 42dB（麦克风灵敏度拉满）
 
 /* ---------------- 运行节奏 ---------------- */
 #define IMU_RATE_HZ     200          // 加速度采样频率
@@ -72,16 +72,18 @@
 /* 这块板子屏面竖直朝驾驶员安装时：X 轴指向车左、Z 轴指向车头，
  * 所以 lat/lon 都必须取反；取反后约定 lat<0=左转、lon<0=刹车，
  * 屏幕上的动效（惯性偏移、四向峰值）都按这个约定计算。 */
-#define DEF_LAT_SIGN   (-1)  // +1 / -1
+#define DEF_LAT_SIGN   (+1)  // +1 / -1（左右甩动方向）
 #define DEF_LON_SIGN   (-1)  // +1 / -1
 
 /* ---------------- 宠物表情阈值(g) ---------------- */
 #define PET_ACC_G      0.13f   // 纵向加速触发 ^ ^
 #define PET_BRK_G      0.11f   // 纵向减速触发 > <
 #define PET_TURN_G     0.13f   // 侧向触发"看向转向侧"
-#define PET_BUMP_P2P   0.30f   // 竖直 240ms 峰峰值 > 此值判定颠簸/减速带
-#define PET_BUMP_CD_MS 420     // 颠簸事件最小间隔
+#define PET_BUMP_P2P   0.55f   // 竖直 240ms 峰峰值 > 此值判定颠簸/减速带
+#define PET_BUMP_CD_MS 700     // 颠簸事件最小间隔
 
 /* ---------------- 其它 ---------------- */
+/* QSPI 时钟：面板只在 GFX 官方轮询路径上稳定，40~80MHz 都实测可跑 */
+#define GVM_LCD_HZ     80000000L
 #define BRIGHTNESS_DEF  210
 #define UI_NOTICE_MS    1200

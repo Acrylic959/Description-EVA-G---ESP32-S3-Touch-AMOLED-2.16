@@ -19,7 +19,7 @@ bool GMeter::begin() {
    * 否则改了 DEF_*_SIGN 也不会生效。 */
   uint8_t sig = s_prefs.getUChar("sig", 0);
   uint8_t ax  = s_prefs.getUChar("ax", 0xFF);
-  if (sig == 0xA7 && ax != 0xFF) {
+  if (sig == 0xA8 && ax != 0xFF) {
     _latIdx  = ax & 0x03;
     _lonIdx  = (ax >> 2) & 0x03;
     _vertIdx = (ax >> 4) & 0x03;
@@ -31,7 +31,7 @@ bool GMeter::begin() {
   } else {
     _latIdx = DEF_LAT_AXIS; _lonIdx = DEF_LON_AXIS; _vertIdx = DEF_VERT_AXIS;
     _latSign = DEF_LAT_SIGN; _lonSign = DEF_LON_SIGN;
-    s_prefs.putUChar("sig", 0xA7);
+    s_prefs.putUChar("sig", 0xA8);
     saveAxis();
   }
   _peak = s_prefs.getFloat("peak", 0.f);
@@ -73,7 +73,7 @@ void GMeter::setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t latSign, int
   _latIdx = lat; _lonIdx = lon; _vertIdx = vert;
   _latSign = latSign < 0 ? -1 : 1;
   _lonSign = lonSign < 0 ? -1 : 1;
-  s_prefs.putUChar("sig", 0xA7);
+  s_prefs.putUChar("sig", 0xA8);
   saveAxis();
 }
 

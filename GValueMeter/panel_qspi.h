@@ -23,6 +23,7 @@ void panelSetWindow(int16_t x, int16_t y, int16_t w, int16_t h);
 
 /* 异步推送 n 个 RGB565 像素（内部按 8192 像素分块走 DMA），立即返回 */
 void panelPush(const uint16_t *px, size_t n);
+void panelPushSync(const uint16_t *px, size_t n);
 
 /* 等待所有排队事务真正发完，再抬高 CS。下一帧开窗前必须调用。 */
 void panelFlush();
@@ -39,3 +40,8 @@ uint32_t panelPushUs();
 uint32_t panelFlushUs();
 uint32_t panelFillUs();
 uint32_t panelQueueUs();
+
+/* 诊断 / 救场：裸命令、写寄存器、整块面板重初始化（不清显存） */
+void panelCmd(uint8_t cmd, const uint8_t *data, int n);
+void panelWriteReg(uint8_t reg, const uint8_t *data, int n);
+void panelReinit();

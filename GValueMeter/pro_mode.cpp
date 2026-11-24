@@ -9,8 +9,8 @@
 namespace {
 
 /* 硬件圆角会盖住屏幕四角：所有贴边元素左右各内缩到 [36, 444] */
-const int16_t CH_X0 = 36, CH_X1 = 444, CH_Y0 = 326, CH_Y1 = 446;
-const int16_t BAR_X0 = 112, BAR_X1 = 452, BAR_CEN = 282, BAR_HALF = 170, BAR_H = 20;
+const int16_t CH_X0 = 30, CH_X1 = 450, CH_Y0 = 314, CH_Y1 = 418;
+const int16_t BAR_X0 = 104, BAR_X1 = 450, BAR_CEN = 277, BAR_HALF = 173, BAR_H = 20;
 
 /* 曲线纵轴映射：0 -> 底边，CHART_FULL_SCALE -> 顶边 */
 inline int16_t chY(float v) {
@@ -59,14 +59,12 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   drawHeader(c, g);
   drawBigValue(c, g);
 
-  /* 说明文字 + 分隔线 */
-  hudCNC(c, _bigCx, 168, 16, COL_DIM, "合成加速度");
+  /* 分隔线 */
   c->fillRect(0, 192, 480, 1, COL_PRO_GRID);
 
   drawBars(c, g);
 
-  hudCN(c, 36, 296, 24, COL_DIM, "G值曲线");
-  hudCNR(c, 444, 296, 24, COL_DIM, "120点 · 12秒");
+  hudCN(c, 30, 284, 24, COL_DIM, "G值曲线");
 
   drawChart(c, g);
 
@@ -83,15 +81,18 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
 /* ------------------------------------------------------------------ */
 void ProMode::drawHeader(CanvasGFX *c, const GSnapshot &g) {
-  if (g.mag <= HIGH_G_LIMIT) hudCN(c, 36, 10, 24, COL_DIM, "G值表");
+  if (g.mag <= HIGH_G_LIMIT) hudCN(c, 30, 22, 24, COL_DIM, "G值表");
   /* 电量：放在标题与"最大"之间，报警横幅出现时让位 */
-  if (g.mag <= HIGH_G_LIMIT && _batPct >= 0) drawBattery(c, 122, 13);
+  if (g.mag <= HIGH_G_LIMIT && _batPct >= 0) drawBattery(c, 112, 25);
+
+  /* 高 G 报警时横幅占住表头，峰值读数让位（否则"最大"会被横幅压住） */
+  if (g.mag > HIGH_G_LIMIT) return;
 
   char b[16];
   snprintf(b, sizeof(b), "%.2f", _peakS);
   int16_t pw = hudTextW(3, b);
-  hudTextR(c, 444, 12, 3, COL_AMBER, b);
-  hudCNR(c, 444 - pw - 10, 12, 24, lerp565(COL_DIM, COL_AMBER, 0.35f), "最大");
+  hudTextR(c, 450, 24, 3, COL_AMBER, b);
+  hudCNR(c, 440 - pw - 10, 24, 24, lerp565(COL_DIM, COL_AMBER, 0.35f), "最大");
 }
 
 /* 电池图标 + 百分比：绿 >50% / 琥珀 20~50% / 红 <20%（充电时青色 + 闪电） */
@@ -151,15 +152,14 @@ void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
 }
 
 void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
-  hudCN(c, 36, 184, 24, COL_DIM, "三轴分量");
-  hudCNR(c, 444, 190, 16, COL_DIM, "满量程 ±1G");
+  hudCNR(c, 450, 196, 16, COL_DIM, "±1G 满量程");
 
   {
     /* 三条都按自己的绝对值取色：绿 → 青 → 琥珀 → 红，超过 0.8G 自然变红 */
     float a0 = fabsf(_bars[0]), a1 = fabsf(_bars[1]), a2 = fabsf(_bars[2]);
-    drawAxisBar(c, 214, "侧向", _bars[0], valueColor(a0));
-    drawAxisBar(c, 242, "纵向", _bars[1], valueColor(a1));
-    drawAxisBar(c, 270, "竖直", _bars[2], valueColor(a2));
+    drawAxisBar(c, 206, "侧向", _bars[0], valueColor(a0));
+    drawAxisBar(c, 232, "纵向", _bars[1], valueColor(a1));
+    drawAxisBar(c, 258, "竖直", _bars[2], valueColor(a2));
   }
 
   (void)g;
@@ -167,10 +167,10 @@ void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
 
 void ProMode::drawAxisBar(CanvasGFX *c, int16_t y, const char *label,
                           float v, uint16_t col) {
-  hudCN(c, 36, y + 2, 16, COL_TEXT, label);
+  hudCN(c, 30, y + 2, 16, COL_TEXT, label);
   char b[12];
   snprintf(b, sizeof(b), "%+.2f", v);
-  hudTextR(c, 106, y + 6, 1, COL_DIM, b);
+  hudTextR(c, 96, y + 6, 1, COL_DIM, b);
 
   c->drawRect(BAR_X0, y - 1, BAR_X1 - BAR_X0, BAR_H + 1, COL_PRO_GRID);
 
@@ -243,7 +243,7 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
 
   c->drawRect(CH_X0, CH_Y0, CH_X1 - CH_X0 + 1, CH_Y1 - CH_Y0 + 1, COL_PRO_GRID);
 
-  int16_t ly = CH_Y1 + 4;
+  int16_t ly = CH_Y1 + 6;              /* 图例压在安全线以内（y<450），不再被圆角切 */
   hudCN(c, CH_X0, ly, 16, COL_DIM, "-12秒");
   hudCNR(c, CH_X1, ly, 16, COL_DIM, "现在");
 
@@ -258,8 +258,8 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
 
 void ProMode::drawAlarm(CanvasGFX *c, bool on) {
   if (!on) return;
-  c->fillRect(0, 0, 480, 3, COL_RED);
-  c->fillRect(0, 477, 480, 3, COL_RED);
-  c->fillRect(0, 0, 3, 480, COL_RED);
-  c->fillRect(477, 0, 3, 480, COL_RED);
+  /* 圆角边框：屏是圆角屏（四角被切掉约 30px），直角框会在角上"戳出"屏幕，
+   * 这里按屏的圆角半径走圆角，外框 + 一圈更暗的内框做发光层次 */
+  hudRoundBorder(c, 6, 6, 468, 468, 34, COL_RED);
+  hudRoundBorder(c, 13, 13, 454, 454, 28, fade565(COL_RED, COL_PRO_BG, 0.30f));
 }

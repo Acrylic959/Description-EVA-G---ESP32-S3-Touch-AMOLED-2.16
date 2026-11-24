@@ -16,6 +16,8 @@ void PetMode::reset() {
   _blinkWait = 2.5f;
   _blinkAnim = 0.f;
   _singLevel = 0.f;
+  _yawnWait = 7.5f; _yawnT = 0.f; _yawnOpen = 0.f;
+  _lookIdle = 0.f; _lookWait = 2.0f; _lvl = 0.f;
   _lastBeat = 0;
   _beatT = 0.f;
   _eyes = E_IDLE;
@@ -72,8 +74,20 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   else if (a.music)                 _eyes = E_HAPPY;
   else                              _eyes = E_IDLE;
 
-  /* --- 视线：转向侧 --- */
-  _lookTarget = (_turnT > 0.f) ? (float)_turnDir : 0.f;
+  /* --- 视线：转向优先；没有转向时自己左顾右盼，比一直盯着正前方更像活的 --- */
+  if (_turnT > 0.f) {
+    _lookIdle = 0.f;
+    _lookTarget = (float)_turnDir;
+  } else {
+    _lookWait -= dt;
+    if (_lookWait <= 0.f) {
+      _lookWait = 1.7f + (float)random(0, 2600) / 1000.f;
+      _lookIdle = (float)((int)random(-100, 101)) / 100.f;   /* -1..1 */
+    }
+    if (_yawnOpen > 0.2f) _lookIdle = 0.f;
+    _lookIdle += (0.f - _lookIdle) * (1.f - expf(-dt / 0.85f));
+    _lookTarget = _lookIdle;
+  }
   _look += (_lookTarget - _look) * (1.f - expf(-dt / 0.10f));
 
   /* --- 眨眼（仅待机）：0.26s 一次，闭 45% 时间、睁 55%，两头都走 smoothstep --- */
@@ -100,12 +114,15 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
     _blinkAnim = 0.f;
     _blinkOpen = 1.f;
   }
+  /* 打哈欠时眼睛越闭越紧（和普通眨眼取更小的那个） */
+  if (_yawnOpen > 0.f) _blinkOpen = fminf(_blinkOpen, 1.f - 0.95f * _yawnOpen);
 
   /* --- 嘴型 --- */
   float target = a.music ? a.level : 0.f;
   _singLevel += (target - _singLevel) * (1.f - expf(-dt / 0.045f));
 
-  if (_bumpT > 0.f)                        _mouth = M_O;
+  if (_yawnOpen > 0.25f)                   _mouth = M_O;
+  else if (_bumpT > 0.f)                   _mouth = M_O;
   else if (_brkT > 0.f)                    _mouth = M_O;
   else if (a.music && _singLevel > 0.10f)  _mouth = M_SING;
   else if (_accT > 0.f)                    _mouth = M_OPEN;
@@ -114,14 +131,14 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   /* --- 整体悬浮：目标是"惯性甩出去"的方向 × 增益，二阶弹簧追，外加很慢的"液体"漂移 ---
    *  刹车（lon<0）身体前冲 → 屏幕上方；左转（lat<0）身体右甩 → 屏幕右侧。 */
   {
-    const float MAX_X = 44.f, MAX_Y = 40.f;
-    float tx = -g.lat * 48.f + 3.2f * sinf(_t * 0.72f) + 2.2f * sinf(_t * 1.21f + 1.7f);
-    float ty =  g.lon * 44.f + 2.6f * sinf(_t * 0.88f + 0.6f) + 1.6f * sinf(_t * 1.37f + 2.4f);
+    const float MAX_X = 74.f, MAX_Y = 58.f;
+    float tx = -g.lat * 86.f + 4.0f * sinf(_t * 0.72f) + 2.6f * sinf(_t * 1.21f + 1.7f);
+    float ty =  g.lon * 74.f + 3.2f * sinf(_t * 0.88f + 0.6f) + 2.0f * sinf(_t * 1.37f + 2.4f);
     if (tx >  MAX_X) tx =  MAX_X;  if (tx < -MAX_X) tx = -MAX_X;
     if (ty >  MAX_Y) ty =  MAX_Y;  if (ty < -MAX_Y) ty = -MAX_Y;
 
     /* x'' = k(目标 - x) - c x'：欠阻尼一点点，撞到目标会轻微回弹，像水里 */
-    const float K = 13.f, C = 5.2f;
+    const float K = 10.5f, C = 4.2f;   /* 更软一点：回摆更大，像被甩出去 */
     _fvx += (K * (tx - _fx) - C * _fvx) * dt;
     _fvy += (K * (ty - _fy) - C * _fvy) * dt;
     _fx += _fvx * dt;
@@ -140,6 +157,25 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   }
   if (_pop > 0.f) _pop = fmaxf(0.f, _pop - dt / 0.45f);
   _popWave = sinf(_pop * 6.283185f) * _pop;     /* 先过冲、再回落、再小过冲 */
+
+  /* --- 待机打哈欠：每 6.5~12.5 秒一次，闭眼 + 大张嘴 + 头顶 Zzz --- */
+  if (_yawnT > 0.f) _yawnT = fmaxf(0.f, _yawnT - dt);
+  if (_standby && _yawnT <= 0.f) {
+    _yawnWait -= dt;
+    if (_yawnWait <= 0.f) {
+      _yawnT = 2.4f;
+      _yawnWait = 6.5f + (float)random(0, 6000) / 1000.f;
+    }
+  }
+  if (_yawnT > 0.f) {
+    float u = 1.f - _yawnT / 2.4f;                 /* 0 → 1 */
+    _yawnOpen = sinf(3.141592f * u);               /* 张到最大再收回 */
+  } else {
+    _yawnOpen = 0.f;
+    if (!_standby) _yawnWait = 6.5f;               /* 开测后重新计时 */
+  }
+
+  _lvl += (a.level - _lvl) * (1.f - expf(-dt / 0.09f));
 
   /* --- 节拍 --- */
   if (a.beatSeq != _lastBeat) {
@@ -189,8 +225,6 @@ void PetMode::draw(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &a) {
 /* ------------------------------ 背景 ------------------------------ */
 void PetMode::drawBackground(CanvasGFX *c) {
   c->fillRect(0, 0, 480, 480, KB);
-  /* 屏幕边缘一圈极淡的绿光，呼应参考视频里屏边的辉光 */
-  hudRing(c, 240.f, 240.f, 236.f, 236.f, 2.f, lerp565(KB, COL_GREEN, 0.12f));
   for (int i = 0; i < DOT_N; i += 3) {
     float tw = 0.5f + 0.5f * sinf(_t * 1.6f + _dotP[i]);
     c->fillCircle(_dotX[i], _dotY[i], 1, fade565(COL_GREEN, KB, 0.08f + 0.12f * tw));
@@ -199,33 +233,33 @@ void PetMode::drawBackground(CanvasGFX *c) {
 
 /* --------------------- 顶部：当前 / 最大 + 二维气泡 --------------------- */
 void PetMode::drawTopBar(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &a) {
-  /* 用户单击按键隐藏 G 值时：整块顶部面板与二维气泡都不画，只留一张干净的脸 */
-  if (_hideG) return;
+  /* 单击按键隐藏 G 值、或待机时：整块顶部面板与二维气泡都不画，只留一张干净的脸 */
+  if (_hideG || _standby) return;
 
   uint16_t accent = gAccent(g.mag);
 
-  hudPanel(c, 86, 12, 258, 70, 20, RGB565(8, 11, 18),
+  hudPanel(c, 30, 24, 286, 70, 20, RGB565(8, 11, 18),
            lerp565(COL_PRO_PANEL, accent, 0.30f));
 
   char buf[24];
   if (_standby) {
     /* 待机：不显示 G 值，提示怎么开测 */
-    hudCN(c, 100, 17, 24, COL_GREEN, "待机");
-    hudCN(c, 100, 49, 16, COL_DIM, "长按 BOOT 开测");
+    hudCN(c, 30, 17, 24, COL_GREEN, "待机");
+    hudCN(c, 30, 49, 16, COL_DIM, "长按 BOOT 开测");
   } else {
-    hudCN(c, 100, 17, 24, COL_DIM, "当前");
+    hudCN(c, 46, 29, 24, COL_DIM, "当前");
     snprintf(buf, sizeof(buf), "%.2f", g.mag);
-    hudTextR(c, 306, 17, 3, accent, buf);
-    hudCN(c, 312, 24, 16, lerp565(COL_DIM, accent, 0.5f), "G");
+    hudTextR(c, 282, 29, 3, accent, buf);
+    hudCN(c, 288, 36, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
-    hudCN(c, 100, 47, 24, COL_DIM, "最大");
+    hudCN(c, 46, 59, 24, COL_DIM, "最大");
     snprintf(buf, sizeof(buf), "%.2f", g.peak);
-    hudTextR(c, 306, 47, 3, COL_AMBER, buf);
-    hudCN(c, 312, 54, 16, lerp565(COL_DIM, COL_AMBER, 0.5f), "G");
+    hudTextR(c, 282, 59, 3, COL_AMBER, buf);
+    hudCN(c, 288, 66, 16, lerp565(COL_DIM, COL_AMBER, 0.5f), "G");
   }
 
   /* 右侧 2D 气泡：点表示"惯性甩出去"的方向（与大脸、圆盘同一约定） */
-  float bx = 386.f, by = 48.f, br = 27.f;
+  float bx = 414.f, by = 64.f, br = 28.f;
   hudRing(c, bx, by, br, br, 1.5f, lerp565(COL_PRO_PANEL, COL_DIM, 0.55f));
   c->fillRect((int16_t)(bx - 6), (int16_t)by, 12, 1, lerp565(COL_PRO_PANEL, COL_DIM, 0.35f));
   c->fillRect((int16_t)bx, (int16_t)(by - 6), 1, 12, lerp565(COL_PRO_PANEL, COL_DIM, 0.35f));
@@ -244,8 +278,8 @@ void PetMode::drawTopBar(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &
 /* ------------------------------ 眼睛 ------------------------------ */
 void PetMode::drawEyes(CanvasGFX *c, float cx, float cy, float R, float mag) {
   /* 贴边透视：脸被"挤"到屏幕边缘时，双眼间距收紧、整体略微缩一圈 */
-  float kx = fabsf(_fx) / 44.f;  if (kx > 1.f) kx = 1.f;
-  float ky = fabsf(_fy) / 40.f;  if (ky > 1.f) ky = 1.f;
+  float kx = fabsf(_fx) / 74.f;  if (kx > 1.f) kx = 1.f;
+  float ky = fabsf(_fy) / 58.f;  if (ky > 1.f) ky = 1.f;
   float ks = sqrtf(kx * kx + ky * ky);  if (ks > 1.f) ks = 1.f;
   float sqX  = 1.f - 0.26f * kx;          /* 横向挤压：两眼靠拢 */
   float sAll = 1.f - 0.13f * ks;          /* 整体略缩：像被推远 */
@@ -268,7 +302,7 @@ void PetMode::drawEyes(CanvasGFX *c, float cx, float cy, float R, float mag) {
     float ex = cx + (i == 0 ? -baseDX : baseDX) + lookX;
     float eyeY = baseY + dy;
 
-    for (int k = 0; k < 3 && _eyes == E_IDLE; k++) {
+    for (int k = 0; k < 2 && _eyes == E_IDLE; k++) {   /* 辉光少一层，省 5~6ms */
       float s = 1.22f - k * 0.075f;   /* 保持调用顺序稳定，占位无实际作用 */
       hudEllipseFill(c, (int16_t)ex, (int16_t)eyeY,
                      (int16_t)(eyeRX * s), (int16_t)(eyeRY * s),
@@ -333,12 +367,24 @@ void PetMode::drawEyes(CanvasGFX *c, float cx, float cy, float R, float mag) {
 /* ------------------------------ 嘴 ------------------------------ */
 void PetMode::drawMouth(CanvasGFX *c, float cx, float cy, float R, float mag) {
   /* 纵向挤压：脸贴上下边缘时，嘴离眼睛更近（五官间距变小） */
-  float ky = fabsf(_fy) / 40.f;  if (ky > 1.f) ky = 1.f;
-  float ks = fabsf(_fx) / 44.f;  if (ks > 1.f) ks = 1.f;
+  float ky = fabsf(_fy) / 58.f;  if (ky > 1.f) ky = 1.f;
+  float ks = fabsf(_fx) / 74.f;  if (ks > 1.f) ks = 1.f;
   float sAll = 1.f - 0.13f * sqrtf(ky * ky + ks * ks + 1e-6f); if (sAll < 0.86f) sAll = 0.86f;
   float my = cy + R * 0.55f * (1.f - 0.30f * ky) * sAll;
   R = R * sAll;
   uint16_t orange = (mag > HIGH_G_LIMIT) ? COL_RED : COL_ORANGE;
+
+  /* 打哈欠：一张慢慢张大、再合上的椭圆嘴，里头露出暗红的舌根 */
+  if (_yawnOpen > 0.15f) {
+    float w = R * (0.11f + 0.20f * _yawnOpen);
+    float h = R * (0.05f + 0.26f * _yawnOpen);
+    hudEllipseFill(c, (int16_t)cx, (int16_t)my, (int16_t)(w * 1.25f), (int16_t)(h * 1.25f),
+                   fade565(orange, KB, 0.10f));
+    hudEllipseFill(c, (int16_t)cx, (int16_t)my, (int16_t)w, (int16_t)h, orange);
+    hudEllipseFill(c, (int16_t)cx, (int16_t)(my + h * 0.45f),
+                   (int16_t)(w * 0.75f), (int16_t)(h * 0.45f), fade565(COL_RED, KB, 0.55f));
+    return;
+  }
 
   switch (_mouth) {
     case M_SMILE:
@@ -372,32 +418,8 @@ void PetMode::drawMouth(CanvasGFX *c, float cx, float cy, float R, float mag) {
 
 /* --------------------------- 特效：底层 --------------------------- */
 void PetMode::drawEffectsBack(CanvasGFX *c, float cx, float cy, float R) {
-  /* 加速：两侧速度线 */
-  if (_accT > 0.f) {
-    float k = _accT / 0.85f;
-    for (int i = 0; i < 5; i++) {
-      float ph = _t * 10.f + i * 1.7f;
-      float yy = 150.f + i * 56.f;
-      float len = 40.f + 26.f * sinf(ph);
-      float x0 = 10.f + 6.f * sinf(ph * 0.6f);
-      uint16_t col = fade565(COL_GREEN, KB, 0.50f * k);
-      hudCapsule(c, x0, yy, x0 + len, yy, 4.f, col);
-      hudCapsule(c, 470.f - x0 - len, yy + 14.f, 470.f - x0, yy + 14.f, 4.f, col);
-    }
-  }
-
-  /* 转弯：转向侧动感线 */
-  if (_turnT > 0.f) {
-    float k = _turnT / 0.55f;
-    float dir = (_turnDir > 0) ? 1.f : -1.f;
-    for (int i = 0; i < 4; i++) {
-      float yy = 150.f + i * 58.f + sinf(_t * 7.f + i) * 6.f;
-      float len = 46.f + 20.f * sinf(_t * 9.f + i * 2.f);
-      float x0 = (dir > 0) ? 404.f : 36.f;
-      hudCapsule(c, x0, yy, x0 + dir * len, yy - 12.f, 5.f,
-                 fade565(COL_GREEN, KB, 0.55f * k));
-    }
-  }
+  /* 加速/转弯的绿色跳动速度线已按要求删除，改由整脸位移来表达惯性 */
+  (void)c; (void)cx; (void)cy; (void)R;
 }
 
 /* --------------------------- 特效：顶层 --------------------------- */
@@ -425,6 +447,45 @@ void PetMode::drawEffectsFront(CanvasGFX *c, float cx, float cy, float R,
     if (bangK > 1.f) bangK = 1.f;
     float len = 22.f + 4.f * sinf(_t * 14.f);
     hudBang(c, cx, 100.f, len, 11.f, fade565(COL_RED, KB, 0.30f + 0.70f * bangK));
+  }
+
+  /* 打哈欠：头顶飘出三个越来越大的 Z */
+  if (_yawnOpen > 0.20f) {
+    for (int i = 0; i < 3; i++) {
+      float ph = fmodf(_t * 0.55f + (float)i * 0.33f, 1.f);
+      float zx = cx + R * 0.55f + (float)i * 15.f;
+      float zy = cy - R * 0.68f - ph * 66.f;
+      float sz = 6.f + (float)i * 5.f;
+      int16_t zp[8] = {
+        (int16_t)(zx - sz), (int16_t)zy,
+        (int16_t)(zx + sz), (int16_t)zy,
+        (int16_t)(zx - sz), (int16_t)(zy + sz),
+        (int16_t)(zx + sz), (int16_t)(zy + sz)
+      };
+      hudPolyline(c, zp, 4, 3.f, fade565(COL_PINK, KB, 0.30f + 0.55f * (1.f - ph)));
+    }
+  }
+
+  /* 开心 / 听歌：脸颊两点腮红 */
+  float blush = (_accT > 0.f) ? 0.85f : (a.music ? 0.55f : 0.f);
+  if (blush > 0.05f) {
+    for (int i = 0; i < 2; i++) {
+      float bx = cx + (i ? 1.f : -1.f) * R * 0.60f;
+      float by = cy + R * 0.22f;
+      hudEllipseFill(c, (int16_t)bx, (int16_t)by,
+                     (int16_t)(R * 0.13f), (int16_t)(R * 0.065f),
+                     fade565(COL_PINK, KB, 0.26f * blush));
+    }
+  }
+
+  /* 高 G：太阳穴上一滴慢慢滑下的汗 */
+  if (g.mag > HIGH_G_LIMIT) {
+    float k = (g.mag - HIGH_G_LIMIT) / 0.5f;
+    if (k > 1.f) k = 1.f;
+    float sx = cx + R * 0.84f;
+    float sy = cy - R * 0.30f + 8.f * sinf(_t * 2.6f);
+    hudEllipseFill(c, (int16_t)sx, (int16_t)(sy + 4.f), (int16_t)6, (int16_t)10,
+                   fade565(COL_TEAL, KB, 0.35f + 0.5f * k));
   }
 
   /* 听歌：音符洒在脸周围往上飘 */

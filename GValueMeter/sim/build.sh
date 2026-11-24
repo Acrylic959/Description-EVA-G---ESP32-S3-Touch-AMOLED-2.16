@@ -5,6 +5,6 @@ cd "$(dirname "$0")/.."
 mkdir -p sim/out
 python3 sim/gen_font.py >/dev/null
 g++ -std=c++17 -O2 -DGVM_SIM -Isim/stubs -I. -o sim/simrun \
-    sim/sim_main.cpp gmeter.cpp pet_mode.cpp pro_mode.cpp gg_mode.cpp cjk_font.cpp -lz
+    sim/sim_main.cpp gmeter.cpp pet_mode.cpp pro_mode.cpp gg_mode.cpp spectrum.cpp cjk_font.cpp -lz
 ./sim/simrun sim/out
 echo "截图在 sim/out/"

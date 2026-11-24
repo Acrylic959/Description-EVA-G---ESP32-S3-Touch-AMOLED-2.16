@@ -51,6 +51,15 @@ class PetMode {
   /* 整体悬浮：脸在屏幕里像泡在液体里的浮子，二阶弹簧跟随 G 方向 */
   float _fx = 0.f, _fy = 0.f, _fvx = 0.f, _fvy = 0.f;
 
+  /* 打哈欠（待机随机触发）：_yawnT 剩余时间，_yawnOpen 0..1 闭眼/张嘴强度 */
+  float _yawnWait = 7.5f, _yawnT = 0.f, _yawnOpen = 0.f;
+
+  /* 空闲视线游移：没有转向事件时自己左顾右盼 */
+  float _lookIdle = 0.f, _lookWait = 2.0f;
+
+  /* 音量包络（驱动背景辉光与腮红的呼吸感） */
+  float _lvl = 0.f;
+
   /* 嘴 */
   float _singLevel = 0.f;
 

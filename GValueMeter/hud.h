@@ -385,7 +385,7 @@ inline int16_t ssCharW(char ch, int16_t h, int16_t t) {
 
 inline int16_t ssMeasure(int16_t h, const char *s) {
   int16_t t = (int16_t)(h / 7); if (t < 3) t = 3;
-  int16_t gap = (int16_t)(t + 2);   /* 数字间距：太窄时 1 会和后面的 5 粘成 6 */
+  int16_t gap = (int16_t)(t * 1.9f);   /* 数字间距：原来是 t+2，太挤时 0 和 0 会贴住 */
   int16_t wsum = 0;
   for (int i = 0; s[i]; i++) {
     if (s[i] == '1') { wsum += (int16_t)(t * 1.35f) + gap; continue; }  /* "1" 只占一根条的宽 */
@@ -398,7 +398,7 @@ inline int16_t ssMeasure(int16_t h, const char *s) {
 inline int16_t ssDraw(Arduino_GFX *d, int16_t x, int16_t y, int16_t h,
                       const char *s, uint16_t on, uint16_t off) {
   int16_t t = (int16_t)(h / 7); if (t < 3) t = 3;
-  int16_t gap = (int16_t)(t + 2);   /* 数字间距：太窄时 1 会和后面的 5 粘成 6 */
+  int16_t gap = (int16_t)(t * 1.9f);   /* 与 ssMeasure 保持一致 */
   int16_t cur = x;
   for (int i = 0; s[i]; i++) {
     char ch = s[i];

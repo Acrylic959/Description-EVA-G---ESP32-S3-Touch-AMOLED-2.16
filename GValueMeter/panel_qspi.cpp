@@ -13,7 +13,7 @@
 
 /* ------------------------------ 常量 ------------------------------ */
 #define PQ_HOST        SPI2_HOST          /* 与 Arduino_ESP32QSPI 同一个主机 */
-#define PQ_HZ          80000000           /* QIO 80MHz × 4 线 = 40MB/s（CO5300 额定上限） */
+#define PQ_HZ          40000000           /* 保守 40MHz：80MHz 下个别批次面板会丢锁（黑屏） */
 #define PQ_CHUNK_PX    8192               /* 每块 16KB */
 #define PQ_POOL        8                  /* 8 块 16KB DMA 缓冲 = 128KB 内部 RAM */
 #define PQ_CHUNK_BYTES (PQ_CHUNK_PX * 2)
@@ -192,6 +192,74 @@ void panelPush(const uint16_t *px, size_t n) {
   }
   s_statCopy++;
   s_pushUs = micros() - tPush0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 面板诊断用：裸命令（只有 cmd，不带 24bit 地址） */
+void panelCmd(uint8_t cmd, const uint8_t *data, int n) {
+  if (!s_dev) return;
+  spi_transaction_ext_t t = {};
+  t.base.flags    = SPI_TRANS_MULTILINE_CMD | SPI_TRANS_VARIABLE_ADDR | SPI_TRANS_VARIABLE_DUMMY;
+  t.command_bits  = 8;
+  t.address_bits  = 0;
+  t.dummy_bits    = 0;
+  t.base.cmd      = cmd;
+  t.base.length   = 0;
+  if (n > 0) {
+    t.base.flags |= SPI_TRANS_USE_TXDATA;
+    t.base.length = (size_t)(n * 8);
+    for (int i = 0; i < n && i < 4; i++) t.base.tx_data[i] = data[i];
+  }
+  digitalWrite(LCD_CS, LOW);
+  spi_device_polling_transmit(s_dev, (spi_transaction_t *)&t);
+  digitalWrite(LCD_CS, HIGH);
+}
+
+/* 写寄存器（0x02 命令 + 24bit 地址 = 寄存器号 << 8） */
+void panelWriteReg(uint8_t reg, const uint8_t *data, int n) {
+  if (!s_dev) return;
+  digitalWrite(LCD_CS, LOW);
+  xferCmd((uint32_t)reg << 8, data, n);
+  digitalWrite(LCD_CS, HIGH);
+}
+
+/* 完整面板重初始化：软复位 → 退出睡眠 → 16bit 彩深 → MADCTL → 亮度 → display on */
+void panelReinit() {
+  if (!s_dev) return;
+  panelCmd(0x01, nullptr, 0);                 /* software reset */
+  delay(150);
+  uint8_t d;
+  d = 0x55; panelWriteReg(0x3A, &d, 1);       /* COLMOD: RGB565 */
+  d = LCD_MADCTL; panelWriteReg(0x36, &d, 1);
+  d = 0xFF; panelWriteReg(0x51, &d, 1);       /* 亮度拉满，先排除亮度为 0 */
+  d = 0x00; panelWriteReg(0x53, &d, 1);       /* BCTRL：手动亮度模式 */
+  panelCmd(0x11, nullptr, 0);                 /* sleep out */
+  delay(160);
+  panelCmd(0x29, nullptr, 0);                 /* display on */
+  delay(40);
+  Serial.println("[LCD] panel reinit done (reset/sleep-out/MADCTL/0x51/display-on)");
+}
+
+/* 轮询版推屏：与 panelPush 完全同样的命令与数据，只是不用 DMA 队列，
+ * 用来隔离"异步队列/CS 时序"与"事务本身"是否有问题 */
+void panelPushSync(const uint16_t *px, size_t n) {
+  if (!s_dev || s_poolN < 2) return;
+  uint32_t t0 = micros();
+  while (n) {
+    size_t chunk = (n > PQ_CHUNK_PX) ? PQ_CHUNK_PX : n;
+    int slot = s_qpos;
+    s_qpos = (s_qpos + 1) % s_poolN;
+    uint16_t *dst = (uint16_t *)s_buf[slot];
+    memcpy(dst, px, chunk * 2);
+    spi_transaction_ext_t *t = &s_tr[slot];
+    fillTrans(t, dst, chunk * 2);
+    spi_device_polling_transmit(s_dev, (spi_transaction_t *)t);
+    px += chunk;
+    n  -= chunk;
+  }
+  digitalWrite(LCD_CS, HIGH);
+  s_pushUs = micros() - t0;
+  if (s_frameStartUs) { s_transferUs = micros() - s_frameStartUs; s_frameStartUs = 0; }
 }
 
 void panelFlush() {

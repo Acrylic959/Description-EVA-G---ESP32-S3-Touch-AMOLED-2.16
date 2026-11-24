@@ -120,6 +120,141 @@ void MicAudio::setActive(bool on) {
 }
 
 /* ------------------------ 采集 + 特征提取 ------------------------------ */
+/* ============================ 频谱：512 点 FFT ============================ */
+#define SP_N     512
+#define SP_FS    16000.f
+
+static float s_re[SP_N], s_im[SP_N], s_smp[SP_N];
+static int   s_fill = 0;
+
+static volatile float s_bands[AUDIO_BANDS];
+static volatile float s_pk[AUDIO_BANDS];
+static volatile bool  s_specOn = false;   /* 只在频谱页打开时才算，省 CPU */
+
+/* 频段边界查表：只在第一次算频谱时跑一遍 powf，省掉每帧 40 次 powf */
+static int  s_k0[AUDIO_BANDS], s_k1[AUDIO_BANDS];
+static bool s_tab = false;
+static float s_agc = 0.f;                 /* 自动增益跟踪（当前最响那一段） */
+static volatile float s_noise = 0.008f;   /* 环境底噪（时域），用来做音量门 */
+
+static void buildBands() {
+  const float binHz = SP_FS / (float)SP_N;
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    float f0 = 80.f * powf(5000.f / 80.f, (float)b / (float)AUDIO_BANDS);
+    float f1 = 80.f * powf(5000.f / 80.f, (float)(b + 1) / (float)AUDIO_BANDS);
+    int k0 = (int)(f0 / binHz), k1 = (int)(f1 / binHz);
+    if (k0 < 1) k0 = 1;
+    if (k1 <= k0) k1 = k0 + 1;
+    if (k1 > SP_N / 2 - 1) k1 = SP_N / 2 - 1;
+    s_k0[b] = k0;
+    s_k1[b] = k1;
+  }
+  s_tab = true;
+}
+
+static void fftRadix2(float *re, float *im) {
+  for (int i = 1, j = 0; i < SP_N; i++) {           /* 位反转 */
+    int bit = SP_N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      float tr = re[i], ti = im[i];
+      re[i] = re[j]; im[i] = im[j];
+      re[j] = tr;    im[j] = ti;
+    }
+  }
+  for (int len = 2; len <= SP_N; len <<= 1) {
+    float ang = -6.2831853f / (float)len;
+    int half = len >> 1;
+    for (int i = 0; i < SP_N; i += len) {
+      for (int k = 0; k < half; k++) {
+        float w = ang * (float)k;
+        float wr = cosf(w), wi = sinf(w);
+        int a = i + k, b = i + k + half;
+        float xr = re[b] * wr - im[b] * wi;
+        float xi = re[b] * wi + im[b] * wr;
+        re[b] = re[a] - xr;  im[b] = im[a] - xi;
+        re[a] += xr;         im[a] += xi;
+      }
+    }
+  }
+}
+
+/* 一次频谱：Hann 窗 → FFT → 20 段对数能量 → dB 压缩 + 自动增益 → 平滑 */
+static void computeSpectrum() {
+  if (!s_tab) buildBands();
+  for (int i = 0; i < SP_N; i++) {
+    float w = 0.5f - 0.5f * cosf(6.2831853f * (float)i / (float)(SP_N - 1));
+    s_re[i] = s_smp[i] * w;
+    s_im[i] = 0.f;
+  }
+  fftRadix2(s_re, s_im);
+
+  float raw[AUDIO_BANDS];
+  float vmax = 0.f, dbmax = -999.f;
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    int k0 = s_k0[b], k1 = s_k1[b];
+    float sum = 0.f;
+    for (int k = k0; k <= k1; k++) sum += s_re[k] * s_re[k] + s_im[k] * s_im[k];
+    float amp = sqrtf(sum / (float)(k1 - k0 + 1)) / (float)SP_N;
+    /* 用 dB 而不是线性幅值来映射：小声也能看出柱形，不再"只有大声才动" */
+    float db = 20.f * log10f(amp + 1e-7f);        /* 约 -140..0 dB */
+    if (db > dbmax) dbmax = db;
+    float v  = (db + 90.f) * (1.f / 45.f);        /* -90dB→0，-45dB→1（实测底噪约 -84dB） */
+    if (v < 0.f) v = 0.f;
+    raw[b] = v;
+    if (v > vmax) vmax = v;
+  }
+
+  /* 自动增益：把当前最响那一段往满格拉，持续小声也能撑起柱形；
+   * 只放大不衰减，静音（vmax 很小）时最多放大 4 倍，避免底噪全顶到天上 */
+  if (vmax > s_agc) s_agc += (vmax - s_agc) * 0.50f;
+  else              s_agc += (vmax - s_agc) * 0.05f;
+  float gain = 1.f;
+  if (s_agc > 0.22f) gain = 0.95f / s_agc;   /* 有真实声音才抬增益（底噪不放大） */
+  if (gain < 1.f) gain = 1.f;
+  if (gain > 4.5f) gain = 4.5f;
+
+  /* 音量门（噪声门）：低于门限的全部按 0 处理，只有一定音量以上的声音才进柱子，
+   * 这样底噪不会把柱子顶起来，柱形也更平滑 */
+  float th = 0.22f;
+  if (s_agc > 0.35f) th = s_agc * 0.38f;
+  if (th < 0.20f) th = 0.20f;
+  if (th > 0.52f) th = 0.52f;
+
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    float v = raw[b] * gain;
+    v = (v - th) * (1.f / (1.f - th));      /* 门限以下 → 0；门限以上线性抬到满格 */
+    if (v < 0.f) v = 0.f;
+    if (v > 1.f) v = 1.f;
+    float old = s_bands[b];
+    /* 起音快、回落更慢：柱形平滑，不会一抖一抖 */
+    s_bands[b] = (v > old) ? (old + (v - old) * 0.55f) : (old + (v - old) * 0.085f);
+    float pk = s_pk[b];
+    if (v > pk) s_pk[b] = v;
+    else { pk -= 0.012f; s_pk[b] = pk > 0.f ? pk : 0.f; }
+  }
+
+  /* 调试：每 30 帧（约 1 秒）打一行，方便对着串口调灵敏度 */
+  static int dbg = 0;
+  if (++dbg >= 30) {
+    dbg = 0;
+    Serial.printf("[SPEC] dbmax=%.1f vmax=%.2f gain=%.2f agc=%.2f\r\n",
+                  dbmax, vmax, gain, s_agc);
+  }
+}
+
+void MicAudio::setSpectrum(bool on) {
+  s_specOn = on;
+  s_fill = 0;
+  if (on) {                                  /* 重新开时清掉上一轮的柱形/峰值/增益 */
+    for (int i = 0; i < AUDIO_BANDS; i++) { s_bands[i] = 0.f; s_pk[i] = 0.f; }
+    s_agc = 0.f;
+  }
+}
+bool MicAudio::spectrumOn() const { return s_specOn; }
+
+
 void MicAudio::runTask() {
   const int FRAMES = 128;                 // 8ms @16k
   static int16_t buf[FRAMES * 2];
@@ -150,6 +285,10 @@ void MicAudio::runTask() {
       lpHi  += (hp - lpHi)  * aHi;
       float mid = lpHi - lpLow;           // 250..3500Hz 带通
       sumSq += mid * mid;
+      if (s_specOn) {                     /* 频谱页才累积，避免白烧 CPU */
+        s_smp[s_fill++] = hp;               /* 频谱用高通信号：保留 40Hz 起的低频段 */
+        if (s_fill >= SP_N) { s_fill = 0; computeSpectrum(); }
+      }
     }
     float rms = sqrtf(sumSq / (float)n);
 
@@ -157,6 +296,10 @@ void MicAudio::runTask() {
     if (rms > envFast) envFast += (rms - envFast) * 0.55f;
     else               envFast += (rms - envFast) * 0.06f;
     envSlow += (rms - envSlow) * 0.015f;
+
+    /* 底噪跟踪：往下立刻跟，往上极慢，得到一个"环境静音电平" */
+    if (envSlow < s_noise) s_noise = envSlow;
+    else                   s_noise += (envSlow - s_noise) * 0.0015f;
 
     uint32_t now = millis();
 
@@ -168,13 +311,15 @@ void MicAudio::runTask() {
       _beatMs = now;
     }
 
-    /* 是否"在听歌/哼歌"：带通能量持续高于阈值（带迟滞） */
-    if (envSlow > 0.0045f) { musicOnMs += 8; musicOffMs = 0; }
+    /* 是否"在听歌/哼歌"：和频谱同一套音量门——必须明显高于环境底噪 */
+    float gate = s_noise * 2.6f + 0.0025f;
+    if (envSlow > gate) { musicOnMs += 8; musicOffMs = 0; }
     else                  { musicOffMs += 8; musicOnMs = 0; }
     if (musicOnMs > 300) _music = true;
     if (musicOffMs > 700) _music = false;
 
-    float lv = envFast * 7.0f;
+    float lv = (envFast - s_noise * 1.4f) * 9.0f;   /* 减掉底噪：安静时嘴不动 */
+    if (lv < 0.f) lv = 0.f;
     if (lv > 1.f) lv = 1.f;
     _level = powf(lv, 0.62f);             // 更跟手的听感
     _rms = rms;
@@ -189,4 +334,8 @@ void MicAudio::snapshot(AudioSnapshot &o) {
   o.ok = _ok;
   o.beatSeq = _beatSeq;
   o.beatAge = (_beatMs == 0) ? 9.f : (millis() - _beatMs) * 0.001f;
+  for (int i = 0; i < AUDIO_BANDS; i++) {
+    o.bands[i]  = s_bands[i];
+    o.bandPk[i] = s_pk[i];
+  }
 }

@@ -23,6 +23,7 @@
 #include "gmeter.h"
 #include "mic_audio.h"
 #include "pet_mode.h"
+#include "spectrum.h"
 #include "pro_mode.h"
 #include "gg_mode.h"
 #include "ui_screen.h"
@@ -287,6 +288,23 @@ int main(int argc, char **argv) {
     pet.setHideG(false);
     pet.setStandby(false);
     printf("[CAP] 待机态 3 张\n");
+  }
+
+  /* 频谱柱：宠物页 + 合成谱线（低频高、高频削，模拟说话/放歌的形态） */
+  {
+    float bands[AUDIO_BANDS], pk[AUDIO_BANDS];
+    for (int i = 0; i < AUDIO_BANDS; i++) {
+      float f = (float)i / (float)(AUDIO_BANDS - 1);
+      float env = 0.92f - 0.60f * f;
+      float wob = 0.55f + 0.45f * sinf((float)i * 1.7f);
+      bands[i] = env * wob;
+      pk[i] = bands[i] + 0.10f;
+    }
+    spectrumDraw(&canvas, bands, pk, 1.0f, 0.55f);
+    canvasPresentAll(&gfx, &canvas);
+    char p[256]; snprintf(p, sizeof(p), "%s/20-spectrum.png", outDir);
+    savePng(p, gfx.framebuffer(), 480, 480);
+    printf("[CAP] 20-spectrum\n");
   }
 
   pro.setBattery(82, false);      /* 模拟器里固定一个电量，方便看排版 */

@@ -33,6 +33,7 @@
 #include <freertos/task.h>
 
 #include "pin_config.h"
+#define GVM_PUSH_GFX 1   /* 稳定性优先：走 GFX 官方推屏，帧缓冲保持小端 */
 #include "canvas_gfx.h"
 #include "hud.h"
 #include "ui_screen.h"
@@ -40,6 +41,7 @@
 #include "mic_audio.h"
 #include "pet_mode.h"
 #include "pro_mode.h"
+#include "spectrum.h"
 #include "gg_mode.h"
 #include "panel_qspi.h"
 #include <Preferences.h>
@@ -66,8 +68,10 @@ uint8_t  g_mode = 0;                 // 0 = 宠物, 1 = 专业, 2 = G-G 圆盘
 bool     g_measuring = false;        // 上电待机，长按 BOOT 开测
 bool     g_hideG = false;            // 宠物页：单击 BOOT 隐藏 / 显示 G 值（存 NVS）
 bool     g_pmuOk = false;
+static bool g_spec = false;          /* 宠物页频谱柱开关（PWR 键） */
 int      g_battPct = -1;             // -1 = 读不到
 bool     g_battChg = false;
+static uint32_t g_lcdTestStart = 0, g_lcdTestUntil = 0;   /* 屏体纯色自检窗口 */
 char     g_notice[40] = {0};
 uint32_t g_noticeUntil = 0;
 uint16_t g_fps = 0;
@@ -126,6 +130,13 @@ static void setNotice(const char *s, uint32_t ms = UI_NOTICE_MS) {
   g_noticeUntil = millis() + ms;
 }
 
+/* 麦克风只在两处开：宠物页测量中、频谱模式（任何页面）。
+ * 专业页 / G-G 圆盘页一律关麦，省 CPU、也避免误触发"听歌"表情。 */
+static void syncMicActive() {
+  bool need = g_spec || (g_mode == 0 && g_measuring);
+  mic.setActive(need);
+}
+
 /* 三页循环：0 宠物 → 1 专业 → 2 G-G 圆盘 → 0 */
 static void applyMode(uint8_t m, bool announce = true) {
   g_mode = (uint8_t)(m % 3);
@@ -139,6 +150,7 @@ static void applyMode(uint8_t m, bool announce = true) {
     gg.reset();
     if (announce) setNotice("G-G圆盘");
   }
+  syncMicActive();
 }
 
 /* 开测 / 停测 */
@@ -147,7 +159,7 @@ static void setMeasuring(bool on) {
   g_measuring = on;
   pet.setStandby(!on);
   gm.setActive(on);
-  mic.setActive(on);
+  syncMicActive();
   if (on) {
     gm.resetPeak();                 /* 峰值与四向峰值都是"本次开测以来" */
     gm.requestZero();
@@ -167,14 +179,93 @@ static void drawNotice(CanvasGFX *c, uint32_t now) {
   uiNotice(c, g_notice);
 }
 
+#ifdef GVM_PUSH_GFX
+/* ---- 分带差分推屏：只把真正发生变化的横条推给面板 ----
+ * GFX 的 draw16bitRGBBitmap 是逐像素做 RGB565 转换后送 SPI，全屏 460KB 要 ~73ms；
+ * 待机/宠物页大部分区域是静止的，按 24 行一条比对哈希，只推脏条，
+ * 点到脸、顶部面板、通知时才多推几条，帧率能翻一截，画面也不会闪。 */
+#define PB_ROWS 48
+#define PB_N    (LCD_HEIGHT / PB_ROWS)
+static uint32_t g_bandHash[PB_N];
+static bool     g_bandOk = false;
+static bool     g_pushAll = true;      /* 面板刚初始化/复位后必须整屏重推 */
+static uint16_t g_dirtyBands = 0;
+static uint32_t g_hashUs = 0, g_bandPushUs = 0;   /* 分带比对/实际送屏耗时 */
+
+static inline uint32_t bandHash(const uint32_t *p, int words) {
+  uint32_t h = 0x811C9DC5u;
+  for (int i = 0; i < words; i++) h = (h * 16777619u) ^ p[i];
+  return h;
+}
+
+static bool g_fastPush = false;      /* 实测 writePixels 比逐像素还慢，默认关闭，留作对比 */
+
+static void pushBand(uint16_t *buf, int b0, int b1) {
+  int16_t y = (int16_t)(b0 * PB_ROWS);
+  int16_t h = (int16_t)((b1 - b0) * PB_ROWS);
+  if (!g_fastPush) {
+    gfx->draw16bitRGBBitmap(0, y, buf + (size_t)y * LCD_WIDTH, LCD_WIDTH, h);
+    return;
+  }
+  /* 关键提速点：GFX 的 draw16bitRGBBitmap 是"每个像素一次 write16"，
+   * 480×480 要 23 万次总线调用；这里改成一次 writeAddrWindow + writePixels，
+   * 由总线内部按 16384 像素一批打包 DMA，调用次数从 23 万降到 14 次。 */
+  gfx->startWrite();
+  gfx->writeAddrWindow(0, y, LCD_WIDTH, h);
+  bus->writePixels(buf + (size_t)y * LCD_WIDTH, (uint32_t)LCD_WIDTH * h);
+  gfx->endWrite();
+}
+
+static void pushDirty(uint16_t *buf) {
+  const int words = LCD_WIDTH * PB_ROWS / 2;
+  const uint32_t *w = (const uint32_t *)buf;
+  g_dirtyBands = 0;
+  g_hashUs = 0;
+  g_bandPushUs = 0;
+  if (!g_bandOk || g_pushAll) {
+    for (int b = 0; b < PB_N; b++)
+      g_bandHash[b] = bandHash(w + (size_t)b * words, words);
+    pushBand(buf, 0, PB_N);
+    g_bandOk = true;
+    g_pushAll = false;
+    g_dirtyBands = PB_N;
+    return;
+  }
+  int run = -1;
+  uint32_t tHash = micros();
+  uint32_t tPush2 = tHash;
+  for (int b = 0; b < PB_N; b++) {
+    uint32_t h = bandHash(w + (size_t)b * words, words);
+    g_hashUs = micros() - tHash;
+    tPush2 = micros();
+    if (h != g_bandHash[b]) {
+      g_bandHash[b] = h;
+      g_dirtyBands++;
+      if (run < 0) run = b;
+    } else if (run >= 0) {
+      pushBand(buf, run, b);
+      run = -1;
+      g_bandPushUs += micros() - tPush2;
+    }
+    tPush2 = micros();
+  }
+  if (run >= 0) { pushBand(buf, run, PB_N); g_bandPushUs += micros() - tPush2; }
+}
+#endif
+
 /* 开机 / 校准进度屏（同步推屏） */
 static void bootScreen(const char *line, float prog) {
-  waitPushIdle();
   uiBoot(&canvas, line, prog);
+#ifdef GVM_PUSH_GFX
+  g_pushAll = true;
+  pushDirty(canvas.buffer());
+#else
+  waitPushIdle();
   panelFlush();
   panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
   panelPush(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
   panelFlush();
+#endif
 }
 
 /* 校准时的进度浮层 */
@@ -248,6 +339,140 @@ static void execCmd(char *cmd) {
     return;
   }
   if (!strncmp(cmd, "info", 4)) { printInfo(); return; }
+  if (!strncmp(cmd, "bench", 5)) {
+    uint32_t t0 = micros();
+    canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, RGB565(3, 5, 9));
+    uint32_t tFill = micros() - t0;
+    t0 = micros();
+    for (int b = 0; b < PB_N; b++) g_bandHash[b] = bandHash((const uint32_t *)canvas.buffer() + (size_t)b * (LCD_WIDTH * PB_ROWS / 2), LCD_WIDTH * PB_ROWS / 2);
+    uint32_t tHash = micros() - t0;
+    t0 = micros();
+    g_pushAll = true;
+    pushDirty(canvas.buffer());
+    uint32_t tPush = micros() - t0;
+    t0 = micros();
+    gfx->draw16bitRGBBitmap(0, 0, canvas.buffer(), LCD_WIDTH, LCD_HEIGHT);
+    uint32_t tGfx = micros() - t0;
+    Serial.printf("[BENCH] fill=%ums hash=%ums pushAll=%ums gfxFull=%ums\r\n",
+                  (unsigned)(tFill / 1000), (unsigned)(tHash / 1000),
+                  (unsigned)(tPush / 1000), (unsigned)(tGfx / 1000));
+    return;
+  }
+  if (!strncmp(cmd, "pushfast", 8)) {
+    g_fastPush = (strstr(cmd, "off") == nullptr);
+    g_pushAll = true;
+    Serial.printf("[CMD] pushfast %s\r\n", g_fastPush ? "on" : "off");
+    return;
+  }
+  if (!strncmp(cmd, "lcd", 3)) {
+    g_pushAll = true;                    /* 面板可能被复位/重配，下一帧整屏重推 */
+    if (strstr(cmd, "reinit")) {
+      waitPushIdle();
+      panelFlush();
+      /* GFX_SKIP_DATABUS_BEGIN：不重开 SPI 总线，只做面板硬件复位（RESET 脚拉低再放）
+       * + 完整 CO5300 初始化序列，这是把"面板卡死/丢锁"救回来的唯一可靠办法 */
+      bool ok = gfx->begin(GFX_SKIP_DATABUS_BEGIN);
+      gfx->setBrightness(BRIGHTNESS_DEF);
+      bus->writeC8D8(0x36, LCD_MADCTL);
+      Serial.printf("[LCD] hw reinit %s\r\n", ok ? "ok" : "failed");
+      setNotice("面板已重新初始化", 2000);
+    } else if (strstr(cmd, "softinit")) {
+      waitPushIdle();
+      panelReinit();
+      setNotice("面板软复位完成", 2000);
+    } else if (strstr(cmd, "bisect")) {
+      /* 逐段二分：每段 2.5 秒，找出"我们的推屏"到底断在哪一步 */
+      waitPushIdle();
+      panelFlush();
+      Serial.println("[LCD] bisect P1 GFX native  = RED");
+      gfx->fillScreen(0xF800); delay(2500);
+
+      canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0x07E0);   /* 纯绿 */
+      Serial.println("[LCD] bisect P2 our sync    = GREEN");
+      panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+      panelPushSync(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
+      delay(2500);
+
+      canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0x001F);   /* 纯蓝 */
+      Serial.println("[LCD] bisect P3 our async   = BLUE");
+      panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+      pushFrameAsync(canvas.buffer());
+      delay(2500);
+      waitPushIdle();
+      panelFlush();
+
+      canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0xFFFF);   /* 纯白 */
+      Serial.println("[LCD] bisect P4 our sync whit");
+      panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+      panelPushSync(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
+      delay(2500);
+      Serial.println("[LCD] bisect done");
+      setNotice("分段测试完成", 2000);
+    } else if (strstr(cmd, "sync")) {
+      waitPushIdle();
+      panelFlush();
+      canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0xF800);
+      panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+      panelPushSync(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
+      Serial.printf("[LCD] sync push done, %luus\r\n", (unsigned long)panelPushUs());
+      setNotice("同步推屏测试", 1500);
+    } else if (strstr(cmd, "gfx")) {
+      /* 边界测试：完全绕开我们的 DMA 推屏，走 GFX 官方轮询路径整屏刷色。
+       * 这一条亮 → 面板活着，问题在我们的推屏路径；这一条也黑 → 面板/排线/供电 */
+      waitPushIdle();
+      panelFlush();
+      gfx->begin(GFX_SKIP_DATABUS_BEGIN);
+      gfx->setBrightness(BRIGHTNESS_DEF);
+      const uint16_t cols[4] = {0xF800, 0x07E0, 0x001F, 0xFFFF};
+      for (int i = 0; i < 4; i++) { gfx->fillScreen(cols[i]); delay(900); }
+      bus->writeC8D8(0x36, LCD_MADCTL);
+      Serial.println("[LCD] gfx path test done");
+      setNotice("GFX 直推测试完成", 2000);
+    } else if (strstr(cmd, "test")) {
+      waitPushIdle();
+      g_lcdTestStart = millis();
+      g_lcdTestUntil = g_lcdTestStart + 3000;
+      Serial.println("[LCD] test pattern: red/green/blue/white/black 3s");
+    } else if (strstr(cmd, "on")) {
+      waitPushIdle();
+      panelCmd(0x29, nullptr, 0);
+      Serial.println("[LCD] display on");
+    } else if (strstr(cmd, "off")) {
+      waitPushIdle();
+      panelCmd(0x28, nullptr, 0);
+      Serial.println("[LCD] display off");
+    } else {
+      Serial.println("[CMD] 用法: lcd reinit|softinit|test|bisect|sync|gfx|on|off");
+    }
+    return;
+  }
+  if (!strncmp(cmd, "spec", 4)) {
+    bool on = !strstr(cmd, "off");
+    if (strstr(cmd, "on")) on = true;
+    setSpectrumMode(on);
+    return;
+  }
+  if (!strncmp(cmd, "fb", 2)) {
+    for (int k = 0; k < 2; k++) {
+      uint16_t *b = k ? bufB : bufA;
+      if (!b) { Serial.printf("[FB] %c null\r\n", k ? 'B' : 'A'); continue; }
+      uint32_t nz = 0, n = (uint32_t)LCD_WIDTH * LCD_HEIGHT;
+      for (uint32_t i = 0; i < n; i += 64) if (b[i]) nz++;
+      Serial.printf("[FB] %c samples=%lu nonzero=%lu p00=%04X pmid=%04X pbar=%04X\r\n",
+                    k ? 'B' : 'A', (unsigned long)(n / 64), (unsigned long)nz,
+                    b[0], b[(LCD_HEIGHT / 2) * LCD_WIDTH + LCD_WIDTH / 2], b[(LCD_HEIGHT - 30) * LCD_WIDTH + 60]);
+    }
+    return;
+  }
+  if (!strncmp(cmd, "axp", 3)) {
+    Serial.printf("[AXP] batt=%dmV %d%% chg=%d vbus=%d batt_in=%d | ALDO1..4=%d%d%d%d BLDO1/2=%d%d\r\n",
+                  g_pmuOk ? power.getBattVoltage() : 0, g_battPct, (int)g_battChg,
+                  g_pmuOk ? (int)power.isVbusIn() : 0, g_pmuOk ? (int)power.isBatteryConnect() : 0,
+                  g_pmuOk ? (int)power.isEnableALDO1() : 0, g_pmuOk ? (int)power.isEnableALDO2() : 0,
+                  g_pmuOk ? (int)power.isEnableALDO3() : 0, g_pmuOk ? (int)power.isEnableALDO4() : 0,
+                  g_pmuOk ? (int)power.isEnableBLDO1() : 0, g_pmuOk ? (int)power.isEnableBLDO2() : 0);
+    return;
+  }
   if (!strncmp(cmd, "g", 1) && (cmd[1] == 0 || cmd[1] == '=')) {
     if (!strncmp(cmd + 1, "=hide", 5))      g_hideG = true;
     else if (!strncmp(cmd + 1, "=show", 5)) g_hideG = false;
@@ -275,7 +500,7 @@ static void execCmd(char *cmd) {
     return;
   }
   if (!strncmp(cmd, "help", 4) || cmd[0] == '?') {
-    Serial.println("cal | start | stop | reset | info | bench | g[=hide|show] | mode pet|pro|gg | bright=0..255 | axis lat=-x lon=-z vert=y");
+    Serial.println("cal | start | stop | reset | info | spec[on|off] | bench | lcd reinit|softinit|test|bisect|sync|gfx|on|off | axp | g[=hide|show] | mode pet|pro|gg | bright=0..255 | axis lat=-x lon=-z vert=y");
     return;
   }
   if (!strncmp(cmd, "mode", 4)) {
@@ -419,6 +644,25 @@ static void updateButtons(uint32_t now) {
   }
 }
 
+/* PWR 键（AXP2101 PWRON）：短按在宠物页切频谱柱 */
+static void setSpectrumMode(bool on) {
+  g_spec = on;
+  mic.setSpectrum(on);
+  syncMicActive();                                  /* 频谱要用麦克风，待机时临时开起来 */
+  setNotice(on ? "频谱柱已开启" : "频谱柱已关闭", 1200);
+  Serial.printf("[CMD] spectrum %s\r\n", on ? "on" : "off");
+}
+
+static void pollPwrKey() {
+  if (!g_pmuOk) return;
+  uint64_t irq = power.getIrqStatus();
+  if (!irq) return;
+  if (irq & (1ULL << 11)) {                 /* XPOWERS_AXP2101_PKEY_SHORT_IRQ */
+    setSpectrumMode(!g_spec);               /* 任何页面按 PWR 都能切频谱 */
+  }
+  power.clearIrqStatus();
+}
+
 /* ------------------------------ IMU 任务 ------------------------------ */
 static void imuTask(void *arg) {
   (void)arg;
@@ -447,6 +691,9 @@ void setup() {
   if (g_pmuOk) {
     power.enableBattDetection();
     power.enableBattVoltageMeasure();
+    /* PWR（PWRON/PEKEY）短按中断：宠物页用来切频谱柱 */
+    power.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
+    power.clearIrqStatus();
     g_battPct = power.getBatteryPercent();
     g_battChg = power.isCharging();
     pro.setBattery(g_battPct, g_battChg);
@@ -455,7 +702,7 @@ void setup() {
     Serial.println("[PMU] AXP2101 未找到（屏幕仍可用）");
   }
 
-  if (!gfx->begin()) {
+  if (!gfx->begin(GVM_LCD_HZ)) {
     Serial.println("[LCD] gfx->begin() failed");
   }
   bus->writeC8D8(0x36, LCD_MADCTL);
@@ -474,7 +721,9 @@ void setup() {
   bufB = canvas.allocExtra();              /* 第二块：推屏与绘制重叠 */
   if (!bufB) Serial.println("[MEM] 第二块帧缓冲分配失败，退化为单缓冲");
 
-  panelAsyncBegin();                       /* 在 GFX 初始化好的 SPI2 上挂异步设备 */
+#ifndef GVM_PUSH_GFX
+  panelAsyncBegin();                       /* 在 GFX 初始化好的 SPI2 上挂异步设备（GFX 推屏模式下不需要） */
+#endif
   g_pushQ    = xQueueCreate(2, sizeof(GFrameJob));
   g_pushDone = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(pushTask, "push", 4096, nullptr, 3, nullptr, 1);
@@ -517,11 +766,25 @@ void loop() {
   uint32_t now = millis();
 
   updateBootKey(now);
+  static uint32_t lastPwr = 0;
+  if (now - lastPwr >= 20) { lastPwr = now; pollPwrKey(); }
   updateButtons(now);
   handleSerial();
 
   static uint32_t lastFrame = 0, fpsT = 0;
   static uint16_t frameCnt = 0;
+
+  /* 屏体纯色自检：5 色循环，用来判断"面板/背光是否活着" */
+  if (g_lcdTestUntil && now < g_lcdTestUntil) {
+    static const uint16_t kCol[5] = {0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000};
+    uint32_t el = now - g_lcdTestStart;
+    if (bufB) canvas.setBuffer(canvas.buffer() == bufA ? bufB : bufA);
+    canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, kCol[(el / 600) % 5]);
+    waitPushIdle();
+    pushFrameAsync(canvas.buffer());
+    delay(10);
+    return;
+  }
 
   uint32_t frameMs = g_measuring ? UI_FRAME_MS : UI_FRAME_MS_STANDBY;
   if (now - lastFrame >= frameMs) {
@@ -533,8 +796,8 @@ void loop() {
     gm.snapshot(g);
     AudioSnapshot a;
     memset(&a, 0, sizeof(a));
-    if (g_measuring) mic.snapshot(a);
-    else             zeroSnapshot(g);
+    if (g_spec || (g_mode == 0 && g_measuring)) mic.snapshot(a);
+    if (!g_measuring) zeroSnapshot(g);
 
     /* 画到"不在推屏"的那块缓冲上，上一帧的 DMA 还在跑也没关系 */
     if (bufB) canvas.setBuffer(canvas.buffer() == bufA ? bufB : bufA);
@@ -542,7 +805,9 @@ void loop() {
     uint32_t tDraw = micros();
     g_perUs = tDraw - g_lastDraw;
     g_lastDraw = tDraw;
-    if (g_mode == 0) {
+    if (g_spec) {
+      spectrumDraw(&canvas, a.bands, a.bandPk, now * 0.001f, a.level);
+    } else if (g_mode == 0) {
       pet.update(g, a, dt);
       pet.draw(&canvas, g, a);
     } else if (g_mode == 1) {
@@ -553,18 +818,25 @@ void loop() {
       gg.draw(&canvas, g);
     }
 
-    if (!g_measuring && g_mode != 0) uiStandbyHint(&canvas, now * 0.001f);
+    if (!g_measuring && g_mode != 0 && !g_spec) uiStandbyHint(&canvas, now * 0.001f);
     drawCalOverlay(&canvas, g);
     drawNotice(&canvas, now);
     uint32_t tPush = micros();
     g_drawUs = tPush - tDraw;
 
-    /* 等上一帧推完 → 本帧交给 core1 的推屏任务（拷贝+DMA 与下一帧绘制并行） */
+    /* 走 GFX 官方推屏路径（面板只认这条；我们自建的 DMA 路径会把面板推成黑屏） */
+#ifdef GVM_PUSH_GFX
+    uint32_t tQueue = micros();
+    g_waitUs = tQueue - tPush;
+    pushDirty(canvas.buffer());
+    g_dmaUs = micros() - tQueue;
+#else
     waitPushIdle();
     uint32_t tQueue = micros();
     g_waitUs = tQueue - tPush;
     pushFrameAsync(canvas.buffer());
     g_dmaUs = panelLastTransferUs();
+#endif
 
     frameCnt++;
     if (now - fpsT >= 1000) {

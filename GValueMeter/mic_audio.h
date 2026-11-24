@@ -12,6 +12,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#define AUDIO_BANDS 20
+
 struct AudioSnapshot {
   float level;       // 0..1，直接驱动嘴型张合
   float rms;         // 带通 RMS（调试用）
@@ -19,6 +21,8 @@ struct AudioSnapshot {
   bool  ok;          // 麦克风是否可用
   uint32_t beatSeq;  // 节拍计数（递增）
   float beatAge;     // 距上次节拍的时间(秒)，用于音符动画
+  float bands[AUDIO_BANDS];    // 20 段对数频谱能量 0..1（快攻慢放，已平滑）
+  float bandPk[AUDIO_BANDS];   // 每段的峰值帽（慢下落）
 };
 
 class MicAudio {
@@ -30,6 +34,9 @@ class MicAudio {
   uint32_t beatCount() const { return _beatSeq; }
   /* 待机：挂起采集任务（I2S DMA 不再触发），开测时恢复 */
   void setActive(bool on);
+  /* 频谱页开关：打开后每 512 点算一次 FFT */
+  void setSpectrum(bool on);
+  bool spectrumOn() const;
 
  private:
   bool _ok = false;

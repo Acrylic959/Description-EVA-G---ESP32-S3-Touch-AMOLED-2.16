@@ -16,7 +16,7 @@
 /* 设备上帧缓冲直接给 SPI DMA 读（零拷贝推屏），SPI 高位先出，
  * 所以像素要在写入时就存成大端；桌面模拟器（-DGVM_SIM）走 GFX 自己的
  * 转换逻辑，保持小端。 */
-#ifndef GVM_SIM
+#if !defined(GVM_SIM) && !defined(GVM_PUSH_GFX)
 #define GVM_FB_BE 1
 #endif
 
