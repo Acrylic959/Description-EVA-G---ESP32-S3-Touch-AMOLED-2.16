@@ -18,6 +18,9 @@ void PetMode::reset() {
   _singLevel = 0.f;
   _yawnWait = 7.5f; _yawnT = 0.f; _yawnOpen = 0.f;
   _lookIdle = 0.f; _lookWait = 2.0f; _lvl = 0.f;
+  _singOn = false; _singT = 0.f; _singWait = 0.f;
+  _idleWait = 2.6f; _nodT = 0.f; _nodY = 0.f;
+  _swayT = 0.f; _swayX = 0.f; _sneezeT = 0.f; _sneezeJ = 0.f;
   _lastBeat = 0;
   _beatT = 0.f;
   _eyes = E_IDLE;
@@ -66,12 +69,54 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   _bumpT = fmaxf(0.f, _bumpT - dt);
   _shakeT = fmaxf(0.f, _shakeT - dt);
 
-  /* --- 眼睛（优先级：颠簸 > 刹车/高G > 加速 > 听歌 > 待机） --- */
+  /* --- 听歌：识别到音乐也只唱一小段，然后回去演别的小动作，画面更丰富 --- */
+  if (a.music) {
+    if (_singT > 0.f) {
+      _singT -= dt;
+      if (_singT <= 0.f) _singWait = 2.6f + (float)random(0, 3400) / 1000.f;
+    } else if (_singWait > 0.f) {
+      _singWait -= dt;
+    } else {
+      _singT = 1.8f + (float)random(0, 1400) / 1000.f;
+    }
+    _singOn = (_singT > 0.f);
+  } else {
+    _singT = 0.f; _singWait = 0.f; _singOn = false;
+  }
+
+  /* --- 待机小动作：点头 / 摇身 / 打喷嚏 轮流来，间隔 3.2~6.4s --- */
+  if (_standby && _yawnT <= 0.f && _singT <= 0.f) {
+    _idleWait -= dt;
+    if (_idleWait <= 0.f) {
+      _idleWait = 3.2f + (float)random(0, 3200) / 1000.f;
+      int pick = (int)random(0, 3);
+      if (pick == 0)      { _nodT = 1.5f; }
+      else if (pick == 1) { _swayT = 2.6f; }
+      else                { _sneezeT = 1.2f; }
+    }
+  } else {
+    _idleWait = 3.2f;
+  }
+  if (_nodT > 0.f)    _nodT = fmaxf(0.f, _nodT - dt);
+  if (_swayT > 0.f)   _swayT = fmaxf(0.f, _swayT - dt);
+  if (_sneezeT > 0.f) _sneezeT = fmaxf(0.f, _sneezeT - dt);
+
+  /* 点头：上下小幅点头；摇身：左右轻摆；打喷嚏：先缩后一记前冲 */
+  _nodY = (_nodT > 0.f) ? 5.f * sinf((1.5f - _nodT) * 6.283185f / 0.75f) : 0.f;
+  _swayX = (_swayT > 0.f) ? 9.f * sinf((2.6f - _swayT) * 6.283185f / 1.3f) : 0.f;
+  {
+    float u = (_sneezeT > 0.f) ? (1.2f - _sneezeT) / 1.2f : 0.f;
+    _sneezeJ = 0.f;
+    if (u > 0.10f && u < 0.40f) { float k = (u - 0.10f) / 0.30f; _sneezeJ = -7.f * k; }
+    else if (u >= 0.40f && u < 0.70f) { float k = (u - 0.40f) / 0.30f; _sneezeJ = -7.f + 18.f * k; }
+  }
+
+  /* --- 眼睛（优先级：喷嚏 > 颠簸 > 刹车/高G > 加速 > 听歌 > 待机） --- */
   if (_bumpT > 0.f)                 _eyes = E_DIZZY;
   else if (_brkT > 0.f)             _eyes = E_SHOCK;
   else if (g.mag > HIGH_G_LIMIT)    _eyes = E_SHOCK;
   else if (_accT > 0.f)             _eyes = E_HAPPY;
-  else if (a.music)                 _eyes = E_HAPPY;
+  else if (_singOn)                 _eyes = E_HAPPY;
   else                              _eyes = E_IDLE;
 
   /* --- 视线：转向优先；没有转向时自己左顾右盼，比一直盯着正前方更像活的 --- */
@@ -116,15 +161,16 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   }
   /* 打哈欠时眼睛越闭越紧（和普通眨眼取更小的那个） */
   if (_yawnOpen > 0.f) _blinkOpen = fminf(_blinkOpen, 1.f - 0.95f * _yawnOpen);
+  if (_sneezeT > 0.f)  _blinkOpen = fminf(_blinkOpen, 0.18f);
 
   /* --- 嘴型 --- */
-  float target = a.music ? a.level : 0.f;
+  float target = _singOn ? a.level : 0.f;
   _singLevel += (target - _singLevel) * (1.f - expf(-dt / 0.045f));
 
   if (_yawnOpen > 0.25f)                   _mouth = M_O;
   else if (_bumpT > 0.f)                   _mouth = M_O;
   else if (_brkT > 0.f)                    _mouth = M_O;
-  else if (a.music && _singLevel > 0.10f)  _mouth = M_SING;
+  else if (_singOn && _singLevel > 0.10f)  _mouth = M_SING;
   else if (_accT > 0.f)                    _mouth = M_OPEN;
   else                                     _mouth = M_SMILE;
 
@@ -213,8 +259,8 @@ void PetMode::draw(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &a) {
   }
   /* 悬浮偏移 34px，加上抖动；脸底部 258+30+172 ≈ 460，仍在屏内 */
   float R = 172.f * breathe;
-  float cx = 240.f + ox + _fx;
-  float cy = 258.f + oy + _fy + 10.f;      /* 整体下移 10px，给顶部 chip 留白 */
+  float cx = 240.f + ox + _fx + _swayX;
+  float cy = 258.f + oy + _fy + 10.f + _nodY + _sneezeJ;
 
   drawEffectsBack(c, cx, cy, R);
   drawEyes(c, cx, cy, R, g.mag);
@@ -467,7 +513,7 @@ void PetMode::drawEffectsFront(CanvasGFX *c, float cx, float cy, float R,
   }
 
   /* 开心 / 听歌：脸颊两点腮红 */
-  float blush = (_accT > 0.f) ? 0.85f : (a.music ? 0.55f : 0.f);
+  float blush = (_accT > 0.f) ? 0.85f : (_singOn ? 0.55f : 0.f);
   if (blush > 0.05f) {
     for (int i = 0; i < 2; i++) {
       float bx = cx + (i ? 1.f : -1.f) * R * 0.60f;
@@ -488,8 +534,8 @@ void PetMode::drawEffectsFront(CanvasGFX *c, float cx, float cy, float R,
                    fade565(COL_TEAL, KB, 0.35f + 0.5f * k));
   }
 
-  /* 听歌：音符洒在脸周围往上飘 */
-  if (a.music) {
+  /* 听歌（只在唱歌那一段）：音符洒在脸周围往上飘 */
+  if (_singOn) {
     for (int i = 0; i < 3; i++) {
       float ph = fmodf(_t * 0.5f + i * 0.34f, 1.f);
       float ang = -1.1f + i * 1.1f;

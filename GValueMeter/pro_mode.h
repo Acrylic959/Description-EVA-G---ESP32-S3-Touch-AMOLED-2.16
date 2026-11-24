@@ -24,7 +24,6 @@ class ProMode {
   void drawAxisBar(CanvasGFX *c, int16_t y, const char *label, float v, uint16_t col);
   void drawBars(CanvasGFX *c, const GSnapshot &g);
   void drawChart(CanvasGFX *c, const GSnapshot &g);
-  void drawAlarm(CanvasGFX *c, float ph);
 
   float _bars[3] = {0, 0, 0};
   float _magS = 0.f;

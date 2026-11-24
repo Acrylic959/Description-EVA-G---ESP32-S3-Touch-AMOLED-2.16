@@ -57,6 +57,7 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
     c->fillRect(0, 0, 480, 480, COL_PRO_BG);
     _needFull = false;
   } else {
+    c->fillRect(0, 0, 480, 46, COL_PRO_BG);      /* 表头：数字宽度会变，必须清，否则残影重叠 */
     c->fillRect(40, 44, 400, 146, COL_PRO_BG);   /* 大数字 / 单位 G / 报警横幅 */
     c->fillRect(0, 190, 480, 118, COL_PRO_BG);   /* 满量程标签 + 三条分量条 + 分隔线 */
   }
@@ -76,8 +77,7 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
   /* 报警：横幅放在大数字与分量条之间（不压任何别的元素），红框走单层辉光 */
   if (alarmNow) {
-    float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 和 G-G 页同一种平滑呼吸 */
-    drawAlarm(c, ph);
+    float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 平滑呼吸（原来那条整屏红框已按反馈删除） */
     uint16_t bg = lerp565(COL_PRO_BG, COL_RED, 0.18f + 0.22f * ph);
     hudPanel(c, 152, 150, 176, 34, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
     hudGlowBorder(c, 152, 150, 176, 34, 14, COL_RED, bg, 0.18f + 0.30f * ph);
@@ -263,8 +263,4 @@ void ProMode::drawChart(CanvasGFX *c, const GSnapshot &g) {
   hudCN(c, x2 + 17, ly, 16, COL_DIM, "最大");
 }
 
-void ProMode::drawAlarm(CanvasGFX *c, float ph) {
-  /* 屏四角是半径约 56px 的圆弧：框内缩 16、圆角 40 才不会被切。
-   * 只有一条框线，靠向内 3 圈递减做辉光（不再是外框 + 内框两层）。 */
-  hudGlowBorder(c, 16, 16, 448, 448, 40, COL_RED, COL_PRO_BG, 0.32f + 0.55f * ph);
-}
+

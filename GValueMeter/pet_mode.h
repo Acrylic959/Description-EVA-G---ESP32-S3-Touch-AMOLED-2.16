@@ -57,6 +57,16 @@ class PetMode {
   /* 空闲视线游移：没有转向事件时自己左顾右盼 */
   float _lookIdle = 0.f, _lookWait = 2.0f;
 
+  /* 听歌不是一直唱：唱一小段 → 冷却（这期间演别的小动作）→ 再唱 */
+  bool  _singOn = false;
+  float _singT = 0.f, _singWait = 0.f;
+
+  /* 待机小动作：点头 / 摇身 / 打喷嚏，轮流来 */
+  float _idleWait = 2.6f;
+  float _nodT = 0.f, _nodY = 0.f;
+  float _swayT = 0.f, _swayX = 0.f;
+  float _sneezeT = 0.f, _sneezeJ = 0.f;
+
   /* 音量包络（驱动背景辉光与腮红的呼吸感） */
   float _lvl = 0.f;
 
