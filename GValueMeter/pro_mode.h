@@ -33,4 +33,5 @@ class ProMode {
   int16_t _bigCx = 232;   /* 大号数字的水平中心，说明文字跟着它对齐 */
   bool _needFull = true;  /* 下一帧整屏重画（切页 / 报警状态变化时置位） */
   bool _alarmPrev = false;
+  float _alarmHold = 0.f;   /* 报警保持：跨过 0.80G 后继续亮 0.45s，防止阈值抖动 */
 };

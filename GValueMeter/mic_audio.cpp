@@ -135,7 +135,19 @@ static volatile bool  s_specOn = false;   /* 只在频谱页打开时才算，�
 static int  s_k0[AUDIO_BANDS], s_k1[AUDIO_BANDS];
 static bool s_tab = false;
 static float s_agc = 0.f;                 /* 自动增益跟踪（当前最响那一段） */
-static volatile float s_noise = 0.008f;   /* 环境底噪（时域），用来做音量门 */
+static volatile float s_noise = 0.008f;   /* 环境底噪（时域） */
+/* 按 dB 域做工况判断：家用车实测车内噪音 怠速 35~45dB、60km/h 55~61、
+ * 80km/h 58~64、120km/h 63~71。音乐要比这个底噪高 10~15dB 才听得出，
+ * 所以频谱/听歌都用"高出底噪多少 dB"（SNR）来判决，而不是绝对幅值。 */
+static float s_nFloorDb    = -85.f;   /* 全带频谱底噪（dB） */
+static float s_midFloorDb  = -85.f;   /* 250~3500Hz（音乐主要能量）底噪（dB） */
+/* 底噪用"滚动窗口最小值"估计：窗口内最安静的那一帧就是环境底噪。
+ * 比"慢慢往上跟"稳得多——放歌/说话不会把底噪抬高，只有真的变吵才会跟着变。 */
+#define NF_SPEC_WIN 64     /* 频谱 ~15 帧/s → 约 4 秒 */
+#define NF_MID_WIN  160    /* 时域 ~15 次/s → 约 10 秒 */
+static float s_nRing[NF_SPEC_WIN];  static int s_nIdx = 0, s_nFill = 0;
+static float s_midRing[NF_MID_WIN]; static int s_midIdx = 0, s_midFill = 0, s_midTick = 0;
+
 
 static void buildBands() {
   const float binHz = SP_FS / (float)SP_N;
@@ -190,42 +202,51 @@ static void computeSpectrum() {
   }
   fftRadix2(s_re, s_im);
 
-  float raw[AUDIO_BANDS];
-  float vmax = 0.f, dbmax = -999.f;
+  float v0[AUDIO_BANDS];       /* 门限之后的 0..1（还没乘增益） */
+  float vmax = 0.f, dbmax = -999.f, dbSum = 0.f;
   for (int b = 0; b < AUDIO_BANDS; b++) {
     int k0 = s_k0[b], k1 = s_k1[b];
     float sum = 0.f;
     for (int k = k0; k <= k1; k++) sum += s_re[k] * s_re[k] + s_im[k] * s_im[k];
     float amp = sqrtf(sum / (float)(k1 - k0 + 1)) / (float)SP_N;
-    /* 用 dB 而不是线性幅值来映射：小声也能看出柱形，不再"只有大声才动" */
     float db = 20.f * log10f(amp + 1e-7f);        /* 约 -140..0 dB */
     if (db > dbmax) dbmax = db;
-    float v  = (db + 90.f) * (1.f / 45.f);        /* -90dB→0，-45dB→1（实测底噪约 -84dB） */
+    dbSum += db;
+    v0[b] = db;
+    (void)vmax;
+  }
+
+  /* 底噪 = 最近 4 秒里最安静的一帧；忽然变低就立刻跟下去 */
+  float avgDb = dbSum / (float)AUDIO_BANDS;
+  s_nRing[s_nIdx] = avgDb;
+  s_nIdx = (s_nIdx + 1) % NF_SPEC_WIN;
+  if (s_nFill < NF_SPEC_WIN) s_nFill++;
+  float nfloor = s_nRing[0];
+  for (int i = 1; i < s_nFill; i++) if (s_nRing[i] < nfloor) nfloor = s_nRing[i];
+  s_nFloorDb = (nfloor < s_nFloorDb) ? nfloor : s_nFloorDb + (nfloor - s_nFloorDb) * 0.30f;
+
+  /* 噪声门（dB 域）：底噪 +6dB 以下一律按 0。车里胎噪/风噪 60~70dB 的底子
+   * 直接被门挡住，只有真正高出一截的音乐才会让柱子动 */
+  float gateDb = s_nFloorDb + 6.0f;
+  float span   = 26.0f;                          /* 门限 +26dB 到满格 */
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    float v = (v0[b] - gateDb) * (1.f / span);
     if (v < 0.f) v = 0.f;
-    raw[b] = v;
+    if (v > 1.f) v = 1.f;
+    v0[b] = v;
     if (v > vmax) vmax = v;
   }
 
-  /* 自动增益：把当前最响那一段往满格拉，持续小声也能撑起柱形；
-   * 只放大不衰减，静音（vmax 很小）时最多放大 4 倍，避免底噪全顶到天上 */
+  /* 自动增益：门限之上的最响柱往满格拉（只放大不衰减，最多 4 倍） */
   if (vmax > s_agc) s_agc += (vmax - s_agc) * 0.50f;
   else              s_agc += (vmax - s_agc) * 0.05f;
   float gain = 1.f;
-  if (s_agc > 0.22f) gain = 0.95f / s_agc;   /* 有真实声音才抬增益（底噪不放大） */
+  if (s_agc > 0.20f) gain = 0.95f / s_agc;
   if (gain < 1.f) gain = 1.f;
-  if (gain > 4.5f) gain = 4.5f;
-
-  /* 音量门（噪声门）：低于门限的全部按 0 处理，只有一定音量以上的声音才进柱子，
-   * 这样底噪不会把柱子顶起来，柱形也更平滑 */
-  float th = 0.22f;
-  if (s_agc > 0.35f) th = s_agc * 0.38f;
-  if (th < 0.20f) th = 0.20f;
-  if (th > 0.52f) th = 0.52f;
+  if (gain > 4.f) gain = 4.f;
 
   for (int b = 0; b < AUDIO_BANDS; b++) {
-    float v = raw[b] * gain;
-    v = (v - th) * (1.f / (1.f - th));      /* 门限以下 → 0；门限以上线性抬到满格 */
-    if (v < 0.f) v = 0.f;
+    float v = v0[b] * gain;
     if (v > 1.f) v = 1.f;
     float old = s_bands[b];
     /* 起音快、回落更慢：柱形平滑，不会一抖一抖 */
@@ -239,8 +260,8 @@ static void computeSpectrum() {
   static int dbg = 0;
   if (++dbg >= 30) {
     dbg = 0;
-    Serial.printf("[SPEC] dbmax=%.1f vmax=%.2f gain=%.2f agc=%.2f\r\n",
-                  dbmax, vmax, gain, s_agc);
+    Serial.printf("[SPEC] dbmax=%.1f floor=%.1f gate=%.1f midfloor=%.1f gain=%.2f\r\n",
+                  dbmax, s_nFloorDb, s_nFloorDb + 6.0f, s_midFloorDb, gain);
   }
 }
 
@@ -311,14 +332,41 @@ void MicAudio::runTask() {
       _beatMs = now;
     }
 
-    /* 是否"在听歌/哼歌"：和频谱同一套音量门——必须明显高于环境底噪 */
-    float gate = s_noise * 2.6f + 0.0025f;
-    if (envSlow > gate) { musicOnMs += 8; musicOffMs = 0; }
-    else                  { musicOffMs += 8; musicOnMs = 0; }
-    if (musicOnMs > 300) _music = true;
-    if (musicOffMs > 700) _music = false;
+    /* 是否"在听歌"：音乐频段（250~3500Hz）要比底噪高 12dB 以上——
+     * 车里胎噪/风噪 60~70dB 集中在低频，这个门限能把发动机/路噪挡掉 */
+    float midDb = 20.f * log10f(rms + 1e-7f);
+    /* 每 8 次采样记一帧（约 15 帧/s），底噪取最近 10 秒的最小值：
+     * 放歌/说话时最小值仍然是环境底噪，不会被抬上去 */
+    if (++s_midTick >= 8) {
+      s_midTick = 0;
+      s_midRing[s_midIdx] = midDb;
+      s_midIdx = (s_midIdx + 1) % NF_MID_WIN;
+      if (s_midFill < NF_MID_WIN) s_midFill++;
+      float mfloor = s_midRing[0];
+      for (int i = 1; i < s_midFill; i++) if (s_midRing[i] < mfloor) mfloor = s_midRing[i];
+      s_midFloorDb = (mfloor < s_midFloorDb) ? mfloor : s_midFloorDb + (mfloor - s_midFloorDb) * 0.30f;
+    }
+    float snr = midDb - s_midFloorDb;              /* 高出底噪多少 dB */
 
-    float lv = (envFast - s_noise * 1.4f) * 9.0f;   /* 减掉底噪：安静时嘴不动 */
+    if (snr > 12.f) { musicOnMs += 8; musicOffMs = 0; }
+    else            { musicOffMs += 8; musicOnMs = 0; }
+    if (musicOnMs > 400 && !_music) {
+      _music = true;
+      Serial.printf("[MUSIC] on  snr=%.1f mid=%.1f floor=%.1f\r\n", snr, midDb, s_midFloorDb);
+    }
+    if (musicOffMs > 900 && _music) {
+      _music = false;
+      Serial.printf("[MUSIC] off snr=%.1f mid=%.1f floor=%.1f\r\n", snr, midDb, s_midFloorDb);
+    }
+
+    /* 嘴型：把 SNR 映射到 0..1（6dB 以下不动，22dB 以上全开），再减掉底噪抖动 */
+    static uint32_t dbgT = 0;
+    if (now - dbgT > 1000) {
+      dbgT = now;
+      Serial.printf("[MIC] mid=%.1f floor=%.1f snr=%.1f\r\n", midDb, s_midFloorDb, snr);
+    }
+
+    float lv = (snr - 6.f) * (1.f / 16.f);
     if (lv < 0.f) lv = 0.f;
     if (lv > 1.f) lv = 1.f;
     _level = powf(lv, 0.62f);             // 更跟手的听感

@@ -9,7 +9,7 @@
 namespace {
 
 /* 硬件圆角会盖住屏幕四角：所有贴边元素左右各内缩到 [36, 444] */
-const int16_t CH_X0 = 30, CH_X1 = 450, CH_Y0 = 314, CH_Y1 = 418;
+const int16_t CH_X0 = 30, CH_X1 = 450, CH_Y0 = 306, CH_Y1 = 410;
 const int16_t BAR_X0 = 104, BAR_X1 = 450, BAR_CEN = 277, BAR_HALF = 173, BAR_H = 20;
 
 /* 曲线纵轴映射：0 -> 底边，CHART_FULL_SCALE -> 顶边 */
@@ -47,19 +47,21 @@ void ProMode::update(const GSnapshot &g, float dt) {
   _bars[2] += (g.vert - _bars[2]) * k;
   _magS += (g.mag - _magS) * (1.f - expf(-dt / 0.05f));
   _peakS = g.peak;
+  if (g.mag > HIGH_G_LIMIT) _alarmHold = 0.45f;
+  else if (_alarmHold > 0.f) _alarmHold = fmaxf(0.f, _alarmHold - dt);
 }
 
 /* ------------------------------------------------------------------ */
 void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
-  bool alarmNow = (g.mag > HIGH_G_LIMIT);
+  bool alarmNow = (_alarmHold > 0.f);
   /* 整屏填充要 21ms；日常只清两块"会变"的区域，省下的时间换成帧率 */
   if (_needFull || alarmNow != _alarmPrev) {
     c->fillRect(0, 0, 480, 480, COL_PRO_BG);
     _needFull = false;
   } else {
     c->fillRect(0, 0, 480, 46, COL_PRO_BG);      /* 表头：数字宽度会变，必须清，否则残影重叠 */
-    c->fillRect(40, 44, 400, 146, COL_PRO_BG);   /* 大数字 / 单位 G / 报警横幅 */
-    c->fillRect(0, 190, 480, 118, COL_PRO_BG);   /* 满量程标签 + 三条分量条 + 分隔线 */
+    c->fillRect(30, 36, 420, 106, COL_PRO_BG);   /* 大数字 / 单位 G */
+    c->fillRect(0, 178, 480, 136, COL_PRO_BG);   /* 分隔线 + 标签 + 三条分量条 + 曲线标题 */
   }
   _alarmPrev = alarmNow;
 
@@ -67,11 +69,11 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   drawBigValue(c, g);
 
   /* 分隔线 */
-  c->fillRect(0, 192, 480, 1, COL_PRO_GRID);
+  c->fillRect(0, 182, 480, 1, COL_PRO_GRID);
 
   drawBars(c, g);
 
-  hudCN(c, 30, 284, 24, COL_DIM, "G值曲线");
+  hudCN(c, 30, 274, 22, COL_DIM, "G值曲线");
 
   drawChart(c, g);
 
@@ -79,9 +81,9 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   if (alarmNow) {
     float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 平滑呼吸（原来那条整屏红框已按反馈删除） */
     uint16_t bg = lerp565(COL_PRO_BG, COL_RED, 0.18f + 0.22f * ph);
-    hudPanel(c, 152, 150, 176, 34, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
-    hudGlowBorder(c, 152, 150, 176, 34, 14, COL_RED, bg, 0.18f + 0.30f * ph);
-    hudCNC(c, 240, 158, 24, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
+    hudPanel(c, 154, 146, 172, 32, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
+    hudGlowBorder(c, 154, 146, 172, 32, 14, COL_RED, bg, 0.18f + 0.30f * ph);
+    hudCNC(c, 240, 154, 22, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
   }
 }
 
@@ -138,7 +140,7 @@ void ProMode::drawBattery(CanvasGFX *c, int16_t x, int16_t y) {
 }
 
 void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
-  const int16_t H_ = 78;
+  const int16_t H_ = 72;
   float v = g.mag > 9.99f ? 9.99f : g.mag;
   uint16_t on = valueColor(v);
   uint16_t off = 0;   /* 不画灭段：只要亮段，读数最干净 */
@@ -150,20 +152,20 @@ void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
   int16_t gw = hudCNW(16, "G");
   int16_t x = (int16_t)((480 - (w + 10 + gw)) / 2);
   _bigCx = (int16_t)(x + w / 2);
-  int16_t ty = 62;
+  int16_t ty = 52;
   ssNumber(c, x, ty, H_, v, 2, on, off);
   hudCN(c, (int16_t)(x + w + 10), (int16_t)(ty + H_ / 2 - 8), 16, COL_TEXT, "G");
 }
 
 void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
-  hudCNR(c, 450, 170, 16, COL_DIM, "±1G 满量程");
+  hudCNR(c, 450, 186, 16, COL_DIM, "±1G 满量程");
 
   {
     /* 三条都按自己的绝对值取色：绿 → 青 → 琥珀 → 红，超过 0.8G 自然变红 */
     float a0 = fabsf(_bars[0]), a1 = fabsf(_bars[1]), a2 = fabsf(_bars[2]);
-    drawAxisBar(c, 206, "侧向", _bars[0], valueColor(a0));
-    drawAxisBar(c, 232, "纵向", _bars[1], valueColor(a1));
-    drawAxisBar(c, 258, "竖直", _bars[2], valueColor(a2));
+    drawAxisBar(c, 200, "侧向", _bars[0], valueColor(a0));
+    drawAxisBar(c, 224, "纵向", _bars[1], valueColor(a1));
+    drawAxisBar(c, 248, "竖直", _bars[2], valueColor(a2));
   }
 
   (void)g;

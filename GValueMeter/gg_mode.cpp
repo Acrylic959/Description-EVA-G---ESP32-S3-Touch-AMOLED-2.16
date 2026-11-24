@@ -44,6 +44,7 @@ void GgMode::reset() {
   _head = _count = 0;
   _acc = 0.f;
   _t = 0.f;
+  _alarmHold = 0.f;
 }
 
 void GgMode::pushTrail(float x, float y) {
@@ -56,6 +57,8 @@ void GgMode::pushTrail(float x, float y) {
 void GgMode::update(const GSnapshot &g, float dt) {
   if (dt > 0.05f) dt = 0.05f;
   _t += dt;
+  if (g.mag > HIGH_G_LIMIT) _alarmHold = 0.45f;
+  else if (_alarmHold > 0.f) _alarmHold = fmaxf(0.f, _alarmHold - dt);
   _acc += dt;
   if (_acc >= 0.04f) {                 /* 25Hz 记一个点，12 秒画满一圈 */
     _acc -= 0.04f;
@@ -66,22 +69,19 @@ void GgMode::update(const GSnapshot &g, float dt) {
   }
 }
 
-/* 四向峰值小读数："0.42" + 小 G。还没出现过的方向用暗色 0.00 占位 */
+/* 四向峰值小读数：只留数字（不再跟 "G"），还没出现过的方向用暗色 0.00 占位 */
 static void drawDirPeak(CanvasGFX *c, int16_t x, int16_t y, float v, bool rightAlign) {
   char b[12];
   snprintf(b, sizeof(b), "%.2f", v);
   uint16_t col = (v > 0.005f) ? ggAccent(v) : lerp565(COL_PRO_PANEL, COL_DIM, 0.55f);
   if (rightAlign) hudTextR(c, x, y, 2, col, b);
   else            hudText(c, x, y, 2, col, b);
-  int16_t w = (int16_t)(strlen(b) * 12);
-  int16_t gx = rightAlign ? (int16_t)(x + 4) : (int16_t)(x + w + 4);
-  hudCN(c, gx, (int16_t)(y + 1), 16, lerp565(COL_DIM, col, 0.5f), "G");
 }
 
 void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   c->fillRect(0, 0, 480, 480, KB);
 
-  bool alarm = (g.mag > HIGH_G_LIMIT);
+  bool alarm = (_alarmHold > 0.f);
   uint16_t accent = ggAccent(g.mag);
 
   /* ---- 顶部：标题 / 历史最大（左右各内缩 36px，避开硬件圆角） ---- */
@@ -95,14 +95,14 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
   /* ---- 当前合成 G：大号读数 ---- */
   snprintf(buf, sizeof(buf), "%.2f", g.mag);
-  hudTextC(c, 240, 36, 4, accent, buf);
-  hudCN(c, 300, 40, 16, lerp565(COL_DIM, accent, 0.5f), "G");
+  hudTextC(c, 240, 28, 4, accent, buf);
+  hudCN(c, 302, 33, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
   /* ---- 四向峰值（取代原来的 刹车/加速/左转/右转 文字标签） ---- */
-  drawDirPeak(c, 211, 72, g.dirPeak[0], false);      /* 上：刹车峰值 */
-  drawDirPeak(c, 211, 382, g.dirPeak[1], false);     /* 下：加速峰值 */
-  drawDirPeak(c, (int16_t)(GG_CX - GG_R - 18), 232, g.dirPeak[2], true);   /* 左：左转峰值 */
-  drawDirPeak(c, (int16_t)(GG_CX + GG_R + 12), 232, g.dirPeak[3], false);  /* 右：右转峰值 */
+  drawDirPeak(c, 208, 88, g.dirPeak[0], false);      /* 上：刹车峰值 */
+  drawDirPeak(c, 208, 386, g.dirPeak[1], false);     /* 下：加速峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX - GG_R - 8), 234, g.dirPeak[2], true);    /* 左：左转峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX + GG_R + 6), 234, g.dirPeak[3], false);   /* 右：右转峰值 */
 
   /* ---- 圆盘：外圈 / 0.5G 圈 / 十字 / 对角 ---- */
   uint16_t ringCol = lerp565(COL_PRO_PANEL, COL_DIM, 0.95f);

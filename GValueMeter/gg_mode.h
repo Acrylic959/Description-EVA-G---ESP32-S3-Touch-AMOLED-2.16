@@ -26,4 +26,5 @@ class GgMode {
   int   _count;
   float _acc;
   float _t;
+  float _alarmHold;   /* 报警迟滞：过 0.80G 后继续亮 0.45s */
 };
