@@ -47,6 +47,12 @@ static float g_ax = 0.f, g_ay = 1.f, g_az = 0.f;
 void simSetAccel(float x, float y, float z) { g_ax = x; g_ay = y; g_az = z; }
 void simGetAccel(float &x, float &y, float &z) { x = g_ax; y = g_ay; z = g_az; }
 
+/* qmi8658_min 的替身：真机走 I2C，这里直接喂合成加速度（单位 g） */
+bool qmiBegin(uint8_t, uint8_t) { return true; }
+bool qmiDataReady() { return true; }
+bool qmiReadAccelMG(float &x, float &y, float &z) { x = g_ax * 1000.f; y = g_ay * 1000.f; z = g_az * 1000.f; return true; }
+uint8_t qmiAddr() { return 0x6B; }
+
 static uint8_t g_pinMode[64];
 void pinMode(uint8_t pin, uint8_t mode) { g_pinMode[pin & 63] = mode; }
 int digitalRead(uint8_t pin) { (void)pin; return HIGH; }
@@ -257,6 +263,24 @@ int main(int argc, char **argv) {
     canvasPresentAll(&gfx, &canvas);
     { char p[256]; snprintf(p, sizeof(p), "%s/00-cal-overlay.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
     printf("[CAP] 启动屏 / 提示条 / 校准浮层 4 张\n");
+  }
+
+  /* ---- 待机态：宠物只播循环动画 + 专业页 / 圆盘页中央提示 ---- */
+  {
+    GSnapshot g0; AudioSnapshot a0;
+    memset(&g0, 0, sizeof(g0)); memset(&a0, 0, sizeof(a0));
+    g0.calProgress = 1.f;
+    pet.setStandby(true);
+    pet.draw(&canvas, g0, a0);
+    canvasPresentAll(&gfx, &canvas);
+    { char p[256]; snprintf(p, sizeof(p), "%s/00-standby-pet.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
+    pro.reset();
+    pro.draw(&canvas, g0);
+    uiStandbyHint(&canvas, 1.3f);
+    canvasPresentAll(&gfx, &canvas);
+    { char p[256]; snprintf(p, sizeof(p), "%s/00-standby-pro.png", outDir); savePng(p, gfx.framebuffer(), 480, 480); }
+    pet.setStandby(false);
+    printf("[CAP] 待机态 2 张\n");
   }
 
   int nextCap = 0;

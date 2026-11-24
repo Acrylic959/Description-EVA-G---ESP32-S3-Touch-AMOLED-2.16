@@ -3,10 +3,15 @@
 #include "pin_config.h"
 #include "hud.h"
 
-/* 圆盘几何：中心和半径。边缘刚好 1.0G。 */
+/* 圆盘几何：中心和半径。边缘刚好 1.0G。
+ * 上下各留 ~70px 给标题行 / 大号读数 / 四向峰值 / 底部三格。 */
 static const float GG_CX = 240.f;
-static const float GG_CY = 252.f;
-static const float GG_R  = 152.f;
+static const float GG_CY = 250.f;
+static const float GG_R  = 148.f;
+
+/* 安全边距：硬件圆角盖住屏幕四角，所有贴边文字向内缩 */
+static const int16_t SAFE_L = 36;
+static const int16_t SAFE_R = 444;
 
 static const uint16_t WH  = RGB565(255, 255, 255);
 static const uint16_t KB  = RGB565(0, 0, 0);
@@ -22,6 +27,18 @@ static inline uint16_t ggAccent(float mag) {
 
 /* 夹在 ±1G：超出边缘的点贴边显示，不画出圆外 */
 static inline float clamp1(float v) { return v > 1.f ? 1.f : (v < -1.f ? -1.f : v); }
+
+/* 圆点位置 = 惯性甩出去的方向（和赛车 G-G 表、宠物脸一致）：
+ *   刹车（lon<0）→ 点向上；加速 → 向下
+ *   左转（lat<0） → 点向右；右转 → 向左                                       */
+static inline void ggMap(const GSnapshot &g, float &x, float &y) {
+  x = clamp1(-g.lat);
+#ifdef GG_BRAKE_UP
+  y = clamp1(GG_BRAKE_UP ? g.lon : -g.lon);
+#else
+  y = clamp1(g.lon);
+#endif
+}
 
 void GgMode::reset() {
   _head = _count = 0;
@@ -43,14 +60,22 @@ void GgMode::update(const GSnapshot &g, float dt) {
   if (_acc >= 0.04f) {                 /* 25Hz 记一个点，12 秒画满一圈 */
     _acc -= 0.04f;
     if (_acc > 0.04f) _acc = 0.f;
-    float x = clamp1(g.lat);
-#ifdef GG_BRAKE_UP
-    float y = clamp1(GG_BRAKE_UP ? g.lon : -g.lon);   /* 刹车（LON 负）朝上 */
-#else
-    float y = clamp1(g.lon);
-#endif
+    float x, y;
+    ggMap(g, x, y);
     pushTrail(x, y);
   }
+}
+
+/* 四向峰值小读数："0.42" + 小 G。还没出现过的方向用暗色 0.00 占位 */
+static void drawDirPeak(CanvasGFX *c, int16_t x, int16_t y, float v, bool rightAlign) {
+  char b[12];
+  snprintf(b, sizeof(b), "%.2f", v);
+  uint16_t col = (v > 0.005f) ? ggAccent(v) : lerp565(COL_PRO_PANEL, COL_DIM, 0.55f);
+  if (rightAlign) hudTextR(c, x, y, 2, col, b);
+  else            hudText(c, x, y, 2, col, b);
+  int16_t w = (int16_t)(strlen(b) * 12);
+  int16_t gx = rightAlign ? (int16_t)(x + 4) : (int16_t)(x + w + 4);
+  hudCN(c, gx, (int16_t)(y + 1), 16, lerp565(COL_DIM, col, 0.5f), "G");
 }
 
 void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
@@ -62,26 +87,25 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   /* 屏边一圈极淡的绿光，和宠物页保持同一套底子 */
   hudRing(c, 240.f, 240.f, 238.f, 238.f, 2.f, fade565(COL_GREEN, KB, alarm ? 0.04f : 0.10f));
 
-  /* ---- 顶部：标题 / 历史最大 ---- */
-  hudCN(c, 20, 2, 24, lerp565(COL_DIM, COL_GREEN, 0.25f), "G-G 圆盘");
+  /* ---- 顶部：标题 / 历史最大（左右各内缩 36px，避开硬件圆角） ---- */
+  hudCN(c, SAFE_L, 10, 24, lerp565(COL_DIM, COL_GREEN, 0.25f), "G-G 圆盘");
   char buf[24];
   snprintf(buf, sizeof(buf), "%.2f", g.peak);
   int16_t vw = (int16_t)(strlen(buf) * 12);            /* size2 每字符 12px */
-  hudTextR(c, 458, 8, 2, COL_AMBER, buf);
-  hudCN(c, 456, 8, 16, lerp565(COL_DIM, COL_AMBER, 0.4f), "G");
-  hudCNR(c, 456 - vw - 14, 9, 16, COL_DIM, "最大");
+  hudCN(c, (int16_t)(SAFE_R - 16), 16, 16, lerp565(COL_DIM, COL_AMBER, 0.4f), "G");
+  hudTextR(c, (int16_t)(SAFE_R - 20), 16, 2, COL_AMBER, buf);
+  hudCNR(c, (int16_t)(SAFE_R - 20 - vw - 12), 17, 16, COL_DIM, "最大");
 
   /* ---- 当前合成 G：大号读数 ---- */
   snprintf(buf, sizeof(buf), "%.2f", g.mag);
-  hudTextC(c, 240, 30, 4, accent, buf);
-  hudCN(c, 300, 34, 16, lerp565(COL_DIM, accent, 0.5f), "G");
+  hudTextC(c, 240, 36, 4, accent, buf);
+  hudCN(c, 300, 40, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
-  /* ---- 四向标签 ---- */
-  uint16_t dim = lerp565(COL_PRO_PANEL, COL_DIM, 0.75f);
-  hudCNC(c, 240, 72, 24, dim, "刹车");
-  hudCNC(c, 240, 406, 24, dim, "加速");
-  hudCNR(c, (int16_t)(GG_CX - GG_R - 10), 240, 24, dim, "左转");
-  hudCN(c, (int16_t)(GG_CX + GG_R + 10), 240, 24, dim, "右转");
+  /* ---- 四向峰值（取代原来的 刹车/加速/左转/右转 文字标签） ---- */
+  drawDirPeak(c, 211, 76, g.dirPeak[0], false);      /* 上：刹车峰值 */
+  drawDirPeak(c, 211, 402, g.dirPeak[1], false);     /* 下：加速峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX - GG_R - 14), 242, g.dirPeak[2], true);   /* 左：左转峰值 */
+  drawDirPeak(c, (int16_t)(GG_CX + GG_R + 10), 242, g.dirPeak[3], false);  /* 右：右转峰值 */
 
   /* ---- 圆盘：外圈 / 0.5G 圈 / 十字 / 对角 ---- */
   uint16_t ringCol = lerp565(COL_PRO_PANEL, COL_DIM, 0.95f);
@@ -133,12 +157,8 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   }
 
   /* ---- 当前点：光晕 + 实心 ---- */
-  float vx = clamp1(g.lat);
-#ifdef GG_BRAKE_UP
-  float vy = clamp1(GG_BRAKE_UP ? g.lon : -g.lon);
-#else
-  float vy = clamp1(g.lon);
-#endif
+  float vx, vy;
+  ggMap(g, vx, vy);
   float px = GG_CX + vx * GG_R;
   float py = GG_CY + vy * GG_R;
   int16_t dr = 9 + (int16_t)(3.f * (g.mag > 1.f ? 1.f : g.mag));
@@ -150,21 +170,20 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   c->fillCircle((int16_t)(px - dr * 0.35f), (int16_t)(py - dr * 0.38f), dr / 3,
                 fade565(WH, accent, 0.55f));
 
-  /* ---- 底部三格：侧向 / 纵向 / 竖直 ---- */
+  /* ---- 底部三格：侧向 / 纵向 / 竖直（整组内缩到 36..444） ---- */
   struct Axis { const char *name; float v; };
-  float a0 = g.lat, a1 = g.lon, a2 = g.vert;
-  Axis axes[3] = {{"侧向", a0}, {"纵向", a1}, {"竖直", a2}};
+  Axis axes[3] = {{"侧向", g.lat}, {"纵向", g.lon}, {"竖直", g.vert}};
   for (int i = 0; i < 3; i++) {
-    int16_t bx = (int16_t)(6 + i * 160);
-    hudPanel(c, bx, 428, 148, 46, 12, RGB565(8, 11, 18),
+    int16_t bx = (int16_t)(SAFE_L + i * 138);
+    hudPanel(c, bx, 428, 132, 46, 12, RGB565(8, 11, 18),
              lerp565(COL_PRO_PANEL, COL_DIM, 0.45f));
-    hudCN(c, bx + 12, 430, 16, COL_DIM, axes[i].name);
+    hudCN(c, bx + 10, 430, 16, COL_DIM, axes[i].name);
     char vb[16];
     snprintf(vb, sizeof(vb), "%+.2f", axes[i].v);
     uint16_t vc = ggAccent(fabsf(axes[i].v));
-    hudText(c, bx + 14, 450, 2, vc, vb);
+    hudText(c, bx + 12, 450, 2, vc, vb);
     int16_t wv = (int16_t)(strlen(vb) * 12);
-    hudCN(c, bx + 20 + wv, 451, 16, lerp565(COL_DIM, vc, 0.5f), "G");
+    hudCN(c, (int16_t)(bx + 18 + wv), 451, 16, lerp565(COL_DIM, vc, 0.5f), "G");
   }
 
   /* ---- 报警：贴边红框闪 + 圆盘内一圈红色辉光（视频里那圈红光） ---- */

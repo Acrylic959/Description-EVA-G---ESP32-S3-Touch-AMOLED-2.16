@@ -9,6 +9,9 @@
  * =========================================================================== */
 #include <stdint.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 struct AudioSnapshot {
   float level;       // 0..1，直接驱动嘴型张合
   float rms;         // 带通 RMS（调试用）
@@ -25,9 +28,12 @@ class MicAudio {
   void snapshot(AudioSnapshot &o);
   bool ok() const { return _ok; }
   uint32_t beatCount() const { return _beatSeq; }
+  /* 待机：挂起采集任务（I2S DMA 不再触发），开测时恢复 */
+  void setActive(bool on);
 
  private:
   bool _ok = false;
+  TaskHandle_t _task = nullptr;
   volatile float _level = 0.f;
   volatile float _rms = 0.f;
   volatile bool  _music = false;

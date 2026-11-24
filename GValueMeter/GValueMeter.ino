@@ -1,19 +1,29 @@
 /* ===========================================================================
  *  GValueMeter.ino — 车载 G 值表 / 宠物表情屏
  *  硬件：Waveshare ESP32-S3-Touch-AMOLED-2.16
- *        · 2.16" 480×480 AMOLED (CO5300, QSPI)
+ *        · 2.16" 480×480 AMOLED (CO5300, QSPI 40MHz ×4)
  *        · QMI8658 六轴 IMU
  *        · ES7210 双麦 + I2S
  *        · AXP2101 电源管理
  *
- *  两套界面：
- *    宠物模式  — 呼吸圆脸 + 眨眼高光 + 加速/减速/颠簸/转弯/听歌表情
+ *  三套界面（侧面键短按循环）：
+ *    宠物模式  — 呼吸圆脸 + 眨眼 + 加速/减速/颠簸/转弯/听歌表情
  *    专业模式  — 大号 G 值 + 三轴分量条 + 120 点曲线 + 0.8G 报警
+ *    G-G 圆盘  — 赛车摩擦圆：圆点按惯性方向在圆内移动并留轨迹 + 四向峰值
  *
- *  按键（GPIO18 侧面键 / GPIO0 BOOT 键，功能相同）：
- *    短按       切换界面
- *    双击       清除历史最大 G
- *    长按 1.2s  重新取重力零点（换车/换安装角度后用）
+ *  两种状态：
+ *    待机（上电默认）— 不采样 IMU、麦克风挂起、20fps，宠物只播循环动画，省电
+ *    测量            — 200Hz 采样、零点校准、三页都显示真实 G 值
+ *
+ *  按键：
+ *    BOOT 长按 1.5s   开测 / 停测（开测时自动重新取重力零点、清本次峰值）
+ *    BOOT 短按        测量中 = 重新取水平零点（车身装歪、换角度后用）
+ *    侧面键短按       切换界面
+ *    侧面键双击       清除峰值
+ *    侧面键长按 1.2s  重新取重力零点
+ *
+ *  推屏：panel_qspi.cpp 用 spi_master 队列事务做异步 DMA 推屏，两块 PSRAM
+ *        帧缓冲交替，画下一帧的同时上一帧还在往屏上发。
  * =========================================================================== */
 #include <Arduino.h>
 #include <Wire.h>
@@ -30,12 +40,15 @@
 #include "mic_audio.h"
 #include "pet_mode.h"
 #include "pro_mode.h"
-#include "touch.h"
 #include "gg_mode.h"
+#include "panel_qspi.h"
 
 /* ------------------------------ 全局对象 ------------------------------ */
+/* is_shared_interface = true：GFX 只在初始化 / 调亮度时短暂持有总线锁，
+ * 平时把 SPI2 让给 panel_qspi 的异步 DMA 设备（否则 GFX 会永久独占总线，
+ * 我们的队列事务会一直等锁 → 卡死在第一帧）。 */
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
-    LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+    LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3, true);
 
 Arduino_CO5300 *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
@@ -49,10 +62,55 @@ ProMode pro;
 GgMode  gg;
 
 uint8_t  g_mode = 0;                 // 0 = 宠物, 1 = 专业, 2 = G-G 圆盘
+bool     g_measuring = false;        // 上电待机，长按 BOOT 开测
 char     g_notice[40] = {0};
 uint32_t g_noticeUntil = 0;
 uint16_t g_fps = 0;
-static uint32_t g_drawUs = 0, g_pushUs = 0;   /* 每帧绘制 / 推屏耗时（微秒） */
+static uint32_t g_drawUs = 0, g_waitUs = 0, g_dmaUs = 0;
+static uint32_t g_perUs = 0, g_lastDraw = 0;  /* 绘制 / 等待推屏 / DMA 实际耗时 */
+static uint16_t *bufA = nullptr, *bufB = nullptr;         /* 两块 PSRAM 帧缓冲 */
+static TaskHandle_t g_imuTask = nullptr;
+
+/* ---- 推屏任务：拷贝+DMA 跑在 core 1，与 core 0 的绘制并行 ---- */
+struct GFrameJob { uint16_t *buf; };
+static QueueHandle_t     g_pushQ    = nullptr;
+static SemaphoreHandle_t g_pushDone = nullptr;
+static bool              g_pushInFlight = false;
+
+static void pushTask(void *arg) {
+  (void)arg;
+  GFrameJob job;
+  for (;;) {
+    if (xQueueReceive(g_pushQ, &job, portMAX_DELAY) != pdTRUE) continue;
+    panelFlush();                      /* 上一帧残余（正常为 0） */
+    panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+    panelPush(job.buf, (size_t)LCD_WIDTH * LCD_HEIGHT);
+    panelFlush();                      /* 等这一帧真正发完，再允许复用该缓冲 */
+    xSemaphoreGive(g_pushDone);
+  }
+}
+
+/* 等上一次推屏彻底结束（含 DMA 排空） */
+static void waitPushIdle() {
+  if (!g_pushInFlight) return;
+  xSemaphoreTake(g_pushDone, portMAX_DELAY);
+  g_pushInFlight = false;
+}
+
+/* 把整帧交给推屏任务，立刻返回；下一帧的绘制与这次拷贝/DMA 重叠 */
+static void pushFrameAsync(uint16_t *buf) {
+  if (!g_pushQ) {                      /* 任务没起来时退化为同步推屏 */
+    panelFlush();
+    panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+    panelPush(buf, (size_t)LCD_WIDTH * LCD_HEIGHT);
+    panelFlush();
+    return;
+  }
+  GFrameJob job = { buf };
+  xQueueSend(g_pushQ, &job, portMAX_DELAY);
+  g_pushInFlight = true;
+}
+static volatile bool g_imuResync = false;
 
 /* ------------------------------ 小工具 ------------------------------ */
 static void setNotice(const char *s, uint32_t ms = UI_NOTICE_MS) {
@@ -76,21 +134,56 @@ static void applyMode(uint8_t m, bool announce = true) {
   }
 }
 
+/* 开测 / 停测 */
+static void setMeasuring(bool on) {
+  if (on == g_measuring) return;
+  g_measuring = on;
+  pet.setStandby(!on);
+  gm.setActive(on);
+  mic.setActive(on);
+  if (on) {
+    gm.resetPeak();                 /* 峰值与四向峰值都是"本次开测以来" */
+    gm.requestZero();
+    g_imuResync = true;
+    if (g_imuTask) vTaskResume(g_imuTask);
+    g_notice[0] = 0;                /* 进度交给校准浮层显示 */
+    Serial.println("[MODE] 测量开始：取零点中");
+  } else {
+    if (g_imuTask) vTaskSuspend(g_imuTask);
+    setNotice("已停止测量", 1800);
+    Serial.println("[MODE] 测量停止：待机");
+  }
+}
+
 static void drawNotice(CanvasGFX *c, uint32_t now) {
   if (!g_notice[0] || now > g_noticeUntil) return;
   uiNotice(c, g_notice);
 }
 
-/* 开机 / 校准进度屏 */
+/* 开机 / 校准进度屏（同步推屏） */
 static void bootScreen(const char *line, float prog) {
+  waitPushIdle();
   uiBoot(&canvas, line, prog);
-  canvasPresentAllFast(gfx, bus, &canvas);
+  panelFlush();
+  panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+  panelPush(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
+  panelFlush();
 }
 
 /* 校准时的进度浮层 */
 static void drawCalOverlay(CanvasGFX *c, const GSnapshot &g) {
   if (!g.calibrating) return;
   uiCalOverlay(c, g.calProgress);
+}
+
+/* 待机时把快照清零：不显示任何 G 值，宠物只播自己的循环动画 */
+static void zeroSnapshot(GSnapshot &g) {
+  g.lat = g.lon = g.vert = g.mag = g.rawMag = g.peak = g.vertP2P = 0.f;
+  for (int i = 0; i < 4; i++) g.dirPeak[i] = 0.f;
+  g.curveCount = 0;
+  g.bumpSeq = 0;
+  g.calibrating = false;
+  g.calProgress = 1.f;
 }
 
 /* ------------------------------ 串口命令 ------------------------------ */
@@ -111,22 +204,34 @@ static bool findAxis(const char *s, const char *key, uint8_t &idx, int &sgn) {
 
 static void printInfo() {
   uint8_t lat, lon, vert;
-  int8_t ls;
-  gm.getAxis(lat, lon, vert, ls);
+  int8_t las, ls;
+  gm.getAxis(lat, lon, vert, las, ls);
   const char *nm[3] = {"X", "Y", "Z"};
-  Serial.printf("[INFO] axis lat=%s lon=%s%s vert=%s | peak=%.2f g | fps=%u | mic=%s | draw=%ums push=%ums\r\n",
-                nm[lat], (ls < 0 ? "-" : ""), nm[lon], nm[vert],
-                gm.peak(), g_fps, mic.ok() ? "ok" : "off",
-                (unsigned)(g_drawUs / 1000), (unsigned)(g_pushUs / 1000));
+  GSnapshot g;
+  gm.snapshot(g);
+  Serial.printf("[INFO] %s | axis lat=%s%s lon=%s%s vert=%s | peak=%.2f 4dir[%.2f %.2f %.2f %.2f] | fps=%u draw=%ums wait=%ums dma=%ums | mic=%s\r\n",
+                g_measuring ? "MEASURE" : "STANDBY",
+                (las < 0 ? "-" : ""), nm[lat], (ls < 0 ? "-" : ""), nm[lon], nm[vert],
+                gm.peak(), g.dirPeak[0], g.dirPeak[1], g.dirPeak[2], g.dirPeak[3],
+                g_fps, (unsigned)(g_drawUs / 1000), (unsigned)(g_waitUs / 1000),
+                (unsigned)(g_dmaUs / 1000), mic.ok() ? "ok" : "off");
+  Serial.printf("[PERF] period=%ums | push=%ums fill=%ums queue=%ums flush=%ums | %s\r\n",
+                (unsigned)(g_perUs / 1000),
+                (unsigned)(panelPushUs() / 1000), (unsigned)(panelFillUs() / 1000),
+                (unsigned)(panelQueueUs() / 1000), (unsigned)(panelFlushUs() / 1000),
+                panelCopyFrames() ? "copy" : "direct");
 }
 
 static void execCmd(char *cmd) {
   if (!strncmp(cmd, "cal", 3)) {
+    if (!g_measuring) { setMeasuring(true); return; }
     gm.requestZero();
     g_notice[0] = 0;              // 进度交给校准浮层显示
     Serial.println("[CMD] zero start");
     return;
   }
+  if (!strncmp(cmd, "start", 5)) { setMeasuring(true);  return; }
+  if (!strncmp(cmd, "stop", 4))  { setMeasuring(false); return; }
   if (!strncmp(cmd, "reset", 5)) {
     gm.resetPeak();
     setNotice("峰值已清零");
@@ -134,8 +239,24 @@ static void execCmd(char *cmd) {
     return;
   }
   if (!strncmp(cmd, "info", 4)) { printInfo(); return; }
+  if (!strncmp(cmd, "bench", 5)) {
+    waitPushIdle();
+    uint32_t t0 = micros();
+    canvas.fillRect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0);
+    uint32_t t1 = micros();
+    panelSetWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+    panelPush(canvas.buffer(), (size_t)LCD_WIDTH * LCD_HEIGHT);
+    uint32_t t2 = micros();
+    panelFlush();
+    uint32_t t3 = micros();
+    Serial.printf("[BENCH] fullfill=%ums push(copy+queue)=%ums drain=%ums | psram write=%.1fMB/s push=%.1fMB/s\r\n",
+                  (unsigned)((t1 - t0) / 1000), (unsigned)((t2 - t1) / 1000), (unsigned)((t3 - t2) / 1000),
+                  (float)(LCD_WIDTH * LCD_HEIGHT * 2) / (float)(t1 - t0),
+                  (float)(LCD_WIDTH * LCD_HEIGHT * 2) / (float)(t2 - t1));
+    return;
+  }
   if (!strncmp(cmd, "help", 4) || cmd[0] == '?') {
-    Serial.println("cal | reset | info | mode pet|pro|gg | bright=0..255 | axis lat=x lon=-z vert=y");
+    Serial.println("cal | start | stop | reset | info | mode pet|pro|gg | bright=0..255 | axis lat=x lon=-z vert=y");
     return;
   }
   if (!strncmp(cmd, "mode", 4)) {
@@ -151,6 +272,7 @@ static void execCmd(char *cmd) {
       int v = atoi(p + 1);
       if (v < 5) v = 5;
       if (v > 255) v = 255;
+      waitPushIdle();                     /* 命令走 GFX 轮询通道，先等 DMA 推完 */
       gfx->setBrightness((uint8_t)v);
       Serial.printf("[CMD] brightness=%d\r\n", v);
     }
@@ -158,19 +280,19 @@ static void execCmd(char *cmd) {
   }
   if (!strncmp(cmd, "axis", 4)) {
     uint8_t lat, lon, vert, i;
-    int8_t ls;
+    int8_t las, ls;
     int sg;
-    gm.getAxis(lat, lon, vert, ls);
+    gm.getAxis(lat, lon, vert, las, ls);
     bool any = false;
-    if (findAxis(cmd, "lat", i, sg))  { lat = i; any = true; }
-    if (findAxis(cmd, "lon", i, sg))  { lon = i; ls = (int8_t)sg; any = true; }
-    if (findAxis(cmd, "vert", i, sg)) { vert = i; any = true; }
+    if (findAxis(cmd, "lat", i, sg))   { lat = i; las = (int8_t)sg; any = true; }
+    if (findAxis(cmd, "lon", i, sg))   { lon = i; ls = (int8_t)sg; any = true; }
+    if (findAxis(cmd, "vert", i, sg))  { vert = i; any = true; }
     if (any) {
-      gm.setAxis(lat, lon, vert, ls);
+      gm.setAxis(lat, lon, vert, las, ls);
       printInfo();
       setNotice("轴向已保存");
     } else {
-      Serial.println("[CMD] 用法: axis lat=x lon=-z vert=y");
+      Serial.println("[CMD] 用法: axis lat=-x lon=-z vert=y");
     }
     return;
   }
@@ -190,46 +312,42 @@ static void handleSerial() {
   }
 }
 
-/* ------------------------------ 触摸滑动 ------------------------------ */
-/* 左滑 → 专业 G 值模式；右滑 → 宠物表情模式（与按键切换等价） */
-static void handleSwipe() {
-  int ev = touchPoll();
-  if (ev == 0) return;
-  if (ev < 0) {                       /* 左滑：下一页 */
-    applyMode((uint8_t)(g_mode + 1));
-  } else if (ev == 1) {               /* 右滑：上一页 */
-    applyMode((uint8_t)((g_mode + 2) % 3));
-  }
-}
-
-/* ------------------------- BOOT 键：重置水平面 ------------------------- */
-/* 车身装歪了、换了安装角度，按一下 BOOT 就重新取一次重力零点（要求：停稳、尽量水平） */
+/* ------------------------- BOOT 键：长按开测 / 短按取零点 ------------------------- */
 static void updateBootKey(uint32_t now) {
-  static bool down = false;
+  static bool down = false, longDone = false;
   static uint32_t downMs = 0;
 
   bool raw = (digitalRead(PIN_BOOT) == LOW);
   if (raw && !down) {
     down = true;
     downMs = now;
+    longDone = false;
+  } else if (raw && down && !longDone && (now - downMs) >= BOOT_LONG_MS) {
+    /* 按住到点直接触发，不用等松手 */
+    longDone = true;
+    setMeasuring(!g_measuring);
   } else if (!raw && down) {
     down = false;
-    if (now - downMs >= 120) {            /* 防抖：短促误触不算 */
-      gm.requestZero();
-      setNotice("重新校准水平，请保持静止", 2200);
-      Serial.println("[BOOT] 水平零点重取");
+    if (!longDone && (now - downMs) >= 120) {      /* 防抖：短促误触不算 */
+      if (g_measuring) {
+        gm.requestZero();
+        setNotice("重新校准水平，请保持静止", 2200);
+        Serial.println("[BOOT] 水平零点重取");
+      } else {
+        setNotice("待机中，长按 BOOT 开始测量", 2000);
+      }
     }
   }
 }
 
-/* ------------------------------ 按键 ------------------------------ */
+/* ------------------------------ 侧面键 ------------------------------ */
 static void updateButtons(uint32_t now) {
   static bool pressed = false;
   static uint32_t downMs = 0, releaseMs = 0;
   static bool longDone = false;
   static uint8_t clicks = 0;
 
-  bool raw = (digitalRead(PIN_KEY3) == LOW);   /* BOOT 键单独走 updateBootKey */
+  bool raw = (digitalRead(PIN_KEY3) == LOW);
 
   if (raw && !pressed) {                       // 按下
     pressed = true;
@@ -252,8 +370,12 @@ static void updateButtons(uint32_t now) {
   } else if (raw && pressed && !longDone) {    // 长按
     if (now - downMs > 1200) {
       longDone = true;
-      gm.requestZero();
-      g_notice[0] = 0;                         // 交给校准浮层
+      if (!g_measuring) {
+        setMeasuring(true);
+      } else {
+        gm.requestZero();
+        g_notice[0] = 0;                       // 交给校准浮层
+      }
     }
   }
 
@@ -270,6 +392,11 @@ static void imuTask(void *arg) {
   TickType_t last = xTaskGetTickCount();
   const TickType_t period = pdMS_TO_TICKS(IMU_PERIOD_MS);
   while (true) {
+    if (g_imuResync) {
+      /* 从待机恢复：重置节拍，避免补跑暂停期间的次数 */
+      g_imuResync = false;
+      last = xTaskGetTickCount();
+    }
     gm.taskStep();
     vTaskDelayUntil(&last, period);
   }
@@ -294,45 +421,55 @@ void setup() {
     Serial.println("[LCD] gfx->begin() failed");
   }
   bus->writeC8D8(0x36, LCD_MADCTL);
-  gfx->fillScreen(RGB565_BLACK);
   gfx->setBrightness(BRIGHTNESS_DEF);
 
   if (!canvas.begin()) {
     Serial.println("[MEM] PSRAM 帧缓冲分配失败，请确认板子 PSRAM=OPI 且已启用");
+    gfx->fillScreen(RGB565_BLACK);
     gfx->setCursor(30, 200);
     gfx->setTextSize(2);
     gfx->setTextColor(COL_RED, COL_RED);
     gfx->println("PSRAM ALLOC FAILED");
     while (true) delay(200);
   }
+  bufA = canvas.buffer();
+  bufB = canvas.allocExtra();              /* 第二块：推屏与绘制重叠 */
+  if (!bufB) Serial.println("[MEM] 第二块帧缓冲分配失败，退化为单缓冲");
+
+  panelAsyncBegin();                       /* 在 GFX 初始化好的 SPI2 上挂异步设备 */
+  g_pushQ    = xQueueCreate(2, sizeof(GFrameJob));
+  g_pushDone = xSemaphoreCreateBinary();
+  xTaskCreatePinnedToCore(pushTask, "push", 4096, nullptr, 3, nullptr, 1);
+
+  pinMode(PIN_KEY3, INPUT_PULLUP);
+  pinMode(PIN_BOOT, INPUT_PULLUP);
 
   bootScreen("正在启动传感器…", 0.05f);
 
   if (!gm.begin()) {
     bootScreen("未找到 QMI8658", 0.2f);
     Serial.println("[IMU] QMI8658 未找到");
-  } else {
-    bootScreen("校准中，请保持车身水平静止", 0.35f);
   }
 
   if (!mic.begin()) {
     Serial.println("[MIC] 音频不可用，宠物表情仅由 G 值驱动");
   }
-  bootScreen("就绪", 0.9f);
-  delay(200);
 
-  xTaskCreatePinnedToCore(imuTask, "imu", 3072, nullptr, 2, nullptr, 0);
+  /* 上电默认待机：IMU 任务创建后立刻挂起，麦克风同理 */
+  xTaskCreatePinnedToCore(imuTask, "imu", 3072, nullptr, 2, &g_imuTask, 0);
+  gm.setActive(false);
+  mic.setActive(false);
+  pet.setStandby(true);
 
-  pinMode(PIN_KEY3, INPUT_PULLUP);
-  pinMode(PIN_BOOT, INPUT_PULLUP);
-
-  touchBegin(&Wire);   /* 触摸芯片找不到就退回按键，不影响其它功能 */
+  bootScreen("就绪 · 长按 BOOT 开测", 1.0f);
+  delay(300);
 
   pet.reset();
   pro.reset();
-  setNotice("左右滑动切换界面");
-  Serial.println("[BOOT] G-Meter ready. 输入 help 查看串口命令");
-  Serial.println("[BOOT] 侧面键短按=翻页 双击=清峰值 长按1.2s=取零点 | 左右滑动=翻页 | BOOT 键=重置水平面");
+  gg.reset();
+  setNotice("侧面键短按切换界面", 2000);
+  Serial.println("[BOOT] G-Meter ready (待机). 输入 help 查看串口命令");
+  Serial.println("[BOOT] BOOT长按1.5s=开测/停测 BOOT短按=重置水平 | 侧面键短按=翻页 双击=清峰值 长按1.2s=取零点");
 }
 
 /* ------------------------------ loop ------------------------------ */
@@ -341,22 +478,30 @@ void loop() {
 
   updateBootKey(now);
   updateButtons(now);
-  handleSwipe();
   handleSerial();
 
   static uint32_t lastFrame = 0, fpsT = 0;
   static uint16_t frameCnt = 0;
 
-  if (now - lastFrame >= UI_FRAME_MS) {
+  uint32_t frameMs = g_measuring ? UI_FRAME_MS : UI_FRAME_MS_STANDBY;
+  if (now - lastFrame >= frameMs) {
     float dt = (now - lastFrame) * 0.001f;
     lastFrame = now;
 
     GSnapshot g;
+    memset(&g, 0, sizeof(g));
     gm.snapshot(g);
     AudioSnapshot a;
-    mic.snapshot(a);
+    memset(&a, 0, sizeof(a));
+    if (g_measuring) mic.snapshot(a);
+    else             zeroSnapshot(g);
+
+    /* 画到"不在推屏"的那块缓冲上，上一帧的 DMA 还在跑也没关系 */
+    if (bufB) canvas.setBuffer(canvas.buffer() == bufA ? bufB : bufA);
 
     uint32_t tDraw = micros();
+    g_perUs = tDraw - g_lastDraw;
+    g_lastDraw = tDraw;
     if (g_mode == 0) {
       pet.update(g, a, dt);
       pet.draw(&canvas, g, a);
@@ -368,12 +513,18 @@ void loop() {
       gg.draw(&canvas, g);
     }
 
+    if (!g_measuring && g_mode != 0) uiStandbyHint(&canvas, now * 0.001f);
     drawCalOverlay(&canvas, g);
     drawNotice(&canvas, now);
     uint32_t tPush = micros();
     g_drawUs = tPush - tDraw;
-    canvasPresentAllFast(gfx, bus, &canvas);
-    g_pushUs = micros() - tPush;
+
+    /* 等上一帧推完 → 本帧交给 core1 的推屏任务（拷贝+DMA 与下一帧绘制并行） */
+    waitPushIdle();
+    uint32_t tQueue = micros();
+    g_waitUs = tQueue - tPush;
+    pushFrameAsync(canvas.buffer());
+    g_dmaUs = panelLastTransferUs();
 
     frameCnt++;
     if (now - fpsT >= 1000) {
@@ -383,7 +534,7 @@ void loop() {
     }
   }
 
-  /* 每秒打印一次运行状态（串口监视器可直接看 G 值与麦克风） */
+  /* 每秒打印一次运行状态（串口监视器可直接看 G 值、帧率与耗时） */
   static uint32_t lastLog = 0;
   if (now - lastLog >= 1000) {
     lastLog = now;

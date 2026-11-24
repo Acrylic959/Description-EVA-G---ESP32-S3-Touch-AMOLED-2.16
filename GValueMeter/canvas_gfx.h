@@ -13,26 +13,38 @@
 #include <esp_heap_caps.h>
 #include <string.h>
 
+/* 设备上帧缓冲直接给 SPI DMA 读（零拷贝推屏），SPI 高位先出，
+ * 所以像素要在写入时就存成大端；桌面模拟器（-DGVM_SIM）走 GFX 自己的
+ * 转换逻辑，保持小端。 */
+#ifndef GVM_SIM
+#define GVM_FB_BE 1
+#endif
+
+#ifndef GVM_FB_BE
+static inline uint16_t cgStore(uint16_t c) { return c; }
+#else
+static inline uint16_t cgStore(uint16_t c) { return __builtin_bswap16(c); }
+#endif
+
 class CanvasGFX : public Arduino_GFX {
  public:
   CanvasGFX(int16_t w, int16_t h) : Arduino_GFX(w, h) {}
 
   bool begin(int32_t speed = GFX_NOT_DEFINED) override {
     (void)speed;
-    size_t bytes = (size_t)_width * _height * 2;
-    _buf = (uint16_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!_buf) {  // PSRAM 没开时退化为内部 RAM（会失败，但便于定位问题）
-      _buf = (uint16_t *)heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
-    }
-    if (_buf) memset(_buf, 0, bytes);
+    _buf = allocBuf();
     return _buf != nullptr;
   }
 
   uint16_t *buffer() { return _buf; }
   size_t   bytes() const { return (size_t)_width * _height * 2; }
 
+  /* 第二块 PSRAM 缓冲：一块在 DMA 推屏时，另一块用来画下一帧 */
+  uint16_t *allocExtra() { return allocBuf(); }
+  void setBuffer(uint16_t *b) { _buf = b; }
+
   void writePixelPreclipped(int16_t x, int16_t y, uint16_t color) override {
-    _buf[(size_t)y * _width + x] = color;
+    _buf[(size_t)y * _width + x] = cgStore(color);
   }
 
   void writeFillRectPreclipped(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override {
@@ -43,18 +55,19 @@ class CanvasGFX : public Arduino_GFX {
     if (y + h > _height) h = _height - y;
     if (w <= 0 || h <= 0) return;
 
+    uint16_t c = cgStore(color);
     uint16_t *p = _buf + (size_t)y * _width + x;
     if (w == _width) {                 // 整行：一次填满
       uint32_t n = (uint32_t)w * h;
-      uint32_t v = ((uint32_t)color << 16) | color;
+      uint32_t v = ((uint32_t)c << 16) | c;
       uint32_t *p32 = (uint32_t *)p;
       uint32_t pairs = n >> 1;
       for (uint32_t i = 0; i < pairs; i++) p32[i] = v;
-      if (n & 1) p[n - 1] = color;
+      if (n & 1) p[n - 1] = c;
     } else {
       for (int16_t j = 0; j < h; j++) {
         uint16_t *row = p + (size_t)j * _width;
-        for (int16_t i = 0; i < w; i++) row[i] = color;
+        for (int16_t i = 0; i < w; i++) row[i] = c;
       }
     }
   }
@@ -64,8 +77,9 @@ class CanvasGFX : public Arduino_GFX {
     if (y < 0) { h += y; y = 0; }
     if (y + h > _height) h = _height - y;
     if (h <= 0) return;
+    uint16_t c = cgStore(color);
     uint16_t *p = _buf + (size_t)y * _width + x;
-    for (int16_t j = 0; j < h; j++) p[(size_t)j * _width] = color;
+    for (int16_t j = 0; j < h; j++) p[(size_t)j * _width] = c;
   }
 
   void writeFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) override {
@@ -73,11 +87,21 @@ class CanvasGFX : public Arduino_GFX {
     if (x < 0) { w += x; x = 0; }
     if (x + w > _width) w = _width - x;
     if (w <= 0) return;
+    uint16_t c = cgStore(color);
     uint16_t *p = _buf + (size_t)y * _width + x;
-    for (int16_t i = 0; i < w; i++) p[i] = color;
+    for (int16_t i = 0; i < w; i++) p[i] = c;
   }
 
  private:
+  /* 64 字节对齐：DMA 与缓存回写都要求行对齐 */
+  uint16_t *allocBuf() {
+    size_t bytes = (size_t)_width * _height * 2;
+    uint16_t *b = (uint16_t *)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!b) b = (uint16_t *)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_8BIT);
+    if (b) memset(b, 0, bytes);
+    return b;
+  }
+
   uint16_t *_buf = nullptr;
 };
 
@@ -95,26 +119,7 @@ inline void canvasPresent(Arduino_GFX *disp, CanvasGFX *cv, int16_t y0, int16_t 
                            cv->width(), y1 - y0);
 }
 
-/* 快速推屏：一次开窗 + 整块 writePixels（走 QSPI 批量传输），
- * 相比 draw16bitRGBBitmap 的逐像素 writePixel，实测快 4~5 倍。 */
-inline void canvasPresentFast(Arduino_CO5300 *disp, Arduino_DataBus *bus,
-                              CanvasGFX *cv, int16_t y0, int16_t y1) {
-  if (y0 < 0) y0 = 0;
-  if (y1 > cv->height()) y1 = cv->height();
-  if (y0 & 1) y0--;
-  if (y1 & 1) y1++;
-  if (y0 < 0) y0 = 0;
-  if (y1 > cv->height()) y1 = cv->height();
-  if (y1 <= y0) return;
-
-  int16_t rows = y1 - y0;
-  disp->startWrite();
-  disp->writeAddrWindow(0, y0, cv->width(), (uint16_t)rows);
-  bus->writePixels(cv->buffer() + (size_t)y0 * cv->width(),
-                   (uint32_t)cv->width() * rows);
-  disp->endWrite();
-}
-
-inline void canvasPresentAllFast(Arduino_CO5300 *disp, Arduino_DataBus *bus, CanvasGFX *cv) {
-  canvasPresentFast(disp, bus, cv, 0, cv->height());
+/* 整帧同步推屏（桌面模拟器 / 无 panel_qspi 时使用） */
+inline void canvasPresentAll(Arduino_GFX *disp, CanvasGFX *cv) {
+  canvasPresent(disp, cv, 0, cv->height());
 }

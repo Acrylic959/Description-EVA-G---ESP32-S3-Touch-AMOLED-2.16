@@ -13,6 +13,7 @@
 class PetMode {
  public:
   void reset();
+  void setStandby(bool on) { _standby = on; }   /* 待机：只播循环动画，不显示 G */
   void update(const GSnapshot &g, const AudioSnapshot &a, float dt);
   void draw(CanvasGFX *cv, const GSnapshot &g, const AudioSnapshot &a);
 
@@ -29,6 +30,7 @@ class PetMode {
                         const GSnapshot &g, const AudioSnapshot &a);
 
   float _t = 0.f;
+  bool  _standby = false;
 
   /* 事件保持时间 */
   float _accT = 0.f, _brkT = 0.f, _turnT = 0.f, _bumpT = 0.f, _shakeT = 0.f;

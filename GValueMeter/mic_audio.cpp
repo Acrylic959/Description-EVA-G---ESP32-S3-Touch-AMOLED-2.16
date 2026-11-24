@@ -105,8 +105,18 @@ bool MicAudio::begin() {
     return false;
   }
   _ok = true;
-  xTaskCreatePinnedToCore(micTaskEntry, "mic", 4096, this, 3, nullptr, 0);
+  xTaskCreatePinnedToCore(micTaskEntry, "mic", 4096, this, 3, &_task, 0);
   return true;
+}
+
+void MicAudio::setActive(bool on) {
+  if (!_task) return;
+  if (on) {
+    _level = 0.f; _rms = 0.f; _music = false;   /* 恢复时不让旧包络残留 */
+    vTaskResume(_task);
+  } else {
+    vTaskSuspend(_task);
+  }
 }
 
 /* ------------------------ 采集 + 特征提取 ------------------------------ */

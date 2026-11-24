@@ -15,15 +15,24 @@ static portMUX_TYPE  s_mux = portMUX_INITIALIZER_UNLOCKED;
 bool GMeter::begin() {
   s_prefs.begin("gmeter", false);
 
-  uint8_t ax = s_prefs.getUChar("ax", 0xFF);
-  if (ax != 0xFF) {
+  /* 旧格式（无签名）里可能存着上一版的方向设置，直接用默认值覆盖一次，
+   * 否则改了 DEF_*_SIGN 也不会生效。 */
+  uint8_t sig = s_prefs.getUChar("sig", 0);
+  uint8_t ax  = s_prefs.getUChar("ax", 0xFF);
+  if (sig == 0xA7 && ax != 0xFF) {
     _latIdx  = ax & 0x03;
     _lonIdx  = (ax >> 2) & 0x03;
     _vertIdx = (ax >> 4) & 0x03;
     _lonSign = (ax & 0x40) ? -1 : 1;
+    _latSign = (ax & 0x80) ? -1 : 1;
     if (_latIdx > 2) _latIdx = DEF_LAT_AXIS;
     if (_lonIdx > 2) _lonIdx = DEF_LON_AXIS;
     if (_vertIdx > 2) _vertIdx = DEF_VERT_AXIS;
+  } else {
+    _latIdx = DEF_LAT_AXIS; _lonIdx = DEF_LON_AXIS; _vertIdx = DEF_VERT_AXIS;
+    _latSign = DEF_LAT_SIGN; _lonSign = DEF_LON_SIGN;
+    s_prefs.putUChar("sig", 0xA7);
+    saveAxis();
   }
   _peak = s_prefs.getFloat("peak", 0.f);
 
@@ -46,29 +55,43 @@ void GMeter::requestZero() {
 
 void GMeter::resetPeak() {
   _peak = 0.f;
+  for (int i = 0; i < 4; i++) _dirPeak[i] = 0.f;
   s_prefs.putFloat("peak", 0.f);
 }
 
-void GMeter::setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t lonSign) {
+void GMeter::setActive(bool on) {
+  _active = on;
+  if (on) {
+    /* 恢复时重置时间基准，避免把暂停时长算进滤波器 */
+    _nowMs = millis();
+    _lastCurveMs = millis();
+  }
+}
+
+void GMeter::setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t latSign, int8_t lonSign) {
   if (lat > 2 || lon > 2 || vert > 2) return;
   _latIdx = lat; _lonIdx = lon; _vertIdx = vert;
+  _latSign = latSign < 0 ? -1 : 1;
   _lonSign = lonSign < 0 ? -1 : 1;
+  s_prefs.putUChar("sig", 0xA7);
   saveAxis();
 }
 
-void GMeter::getAxis(uint8_t &lat, uint8_t &lon, uint8_t &vert, int8_t &lonSign) const {
-  lat = _latIdx; lon = _lonIdx; vert = _vertIdx; lonSign = _lonSign;
+void GMeter::getAxis(uint8_t &lat, uint8_t &lon, uint8_t &vert, int8_t &latSign, int8_t &lonSign) const {
+  lat = _latIdx; lon = _lonIdx; vert = _vertIdx;
+  latSign = _latSign; lonSign = _lonSign;
 }
 
 void GMeter::saveAxis() {
   uint8_t ax = (_latIdx & 3) | ((_lonIdx & 3) << 2) | ((_vertIdx & 3) << 4);
   if (_lonSign < 0) ax |= 0x40;
+  if (_latSign < 0) ax |= 0x80;
   s_prefs.putUChar("ax", ax);
 }
 
 /* ------------------------------------------------------------------ */
 void GMeter::taskStep() {
-  if (!_imuOk) return;
+  if (!_imuOk || !_active) return;
 
   uint32_t now = millis();
 
@@ -135,7 +158,7 @@ void GMeter::taskStep() {
 
   float d[3] = {v[0] - _g0[0], v[1] - _g0[1], v[2] - _g0[2]};
 
-  float lat  = pick(d, _latIdx);
+  float lat  = pick(d, _latIdx) * (float)_latSign;
   float lon  = pick(d, _lonIdx) * (float)_lonSign;
   float vert = pick(d, _vertIdx);
 
@@ -160,6 +183,14 @@ void GMeter::taskStep() {
       _lastSaveMs = now;
     }
   }
+
+  /* ---- 3b) 四向峰值（按车况定义，不是按圆点位置） ----
+   *  本机轴向实测：左转时 lat<0，右转 lat>0；刹车 lon<0，加速 lon>0。
+   *  （表情/圆点按"惯性反向"绘制，与这里的符号相反，见 pet_mode / gg_mode） */
+  if (-_f[1] > _dirPeak[0]) _dirPeak[0] = -_f[1];   /* 刹车 */
+  if ( _f[1] > _dirPeak[1]) _dirPeak[1] =  _f[1];   /* 加速 */
+  if (-_f[0] > _dirPeak[2]) _dirPeak[2] = -_f[0];   /* 左转 */
+  if ( _f[0] > _dirPeak[3]) _dirPeak[3] =  _f[0];   /* 右转 */
 
   /* ---- 4) 颠簸 / 减速带检测：竖直分量 240ms 峰峰值 ---- */
   _vh[_vhIdx] = _f[2];
@@ -199,6 +230,7 @@ void GMeter::snapshot(GSnapshot &o) {
   o.mag  = _mag;
   o.rawMag = _rawMag;
   o.peak = _peak;
+  for (int i = 0; i < 4; i++) o.dirPeak[i] = _dirPeak[i];
   o.vertP2P = _vertP2P;
   o.noise = _noise;
   o.imuOk = _imuOk;

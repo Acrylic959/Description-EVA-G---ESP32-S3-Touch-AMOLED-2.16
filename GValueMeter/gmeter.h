@@ -20,6 +20,7 @@ struct GSnapshot {
   float mag;        // 合成 |G|（滤波后，用于显示/报警）
   float rawMag;     // 合成 |G|（未滤波，用于峰值）
   float peak;       // 历史最大 |G|
+  float dirPeak[4]; // 四向峰值：0 刹车 1 加速 2 左转 3 右转（本次开测以来）
   float vertP2P;    // 最近 240ms 竖直峰峰值
   float noise;      // 静止噪声水平
   int   curveCount;
@@ -36,22 +37,25 @@ class GMeter {
  public:
   bool begin();
   void requestZero();                        // 请求重新取零点
-  void resetPeak();
+  void resetPeak();                          // 清总峰值 + 四向峰值
+  void setActive(bool on);                   // 待机：任务暂停采样（省电）
   bool imuOk() const { return _imuOk; }
   void taskStep();                            // IMU 任务里 200Hz 调用
   void snapshot(GSnapshot &out);              // UI 侧调用（临界区内拷贝）
   float peak() const { return _peak; }
   uint32_t sampleCount() const { return _samples; }
 
-  /* 轴向映射：lat/lon/vert 取 0=X 1=Y 2=Z；lonSign 决定"加速"正方向 */
-  void setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t lonSign);
-  void getAxis(uint8_t &lat, uint8_t &lon, uint8_t &vert, int8_t &lonSign) const;
+  /* 轴向映射：lat/lon/vert 取 0=X 1=Y 2=Z；latSign/lonSign 决定屏幕上的正方向
+   * 约定：lat<0=左转、lon<0=刹车（惯性动效与四向峰值都按此计算） */
+  void setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t latSign, int8_t lonSign);
+  void getAxis(uint8_t &lat, uint8_t &lon, uint8_t &vert, int8_t &latSign, int8_t &lonSign) const;
   void saveAxis();
 
  private:
   float pick(const float *v, uint8_t idx) const { return v[idx]; }
 
   bool     _imuOk = false;
+  bool     _active = true;      /* false = 待机，taskStep 直接返回 */
   bool     _calibrated = false;
   bool     _zeroReq = true;
   bool     _unitKnown = false;
@@ -60,6 +64,7 @@ class GMeter {
   uint8_t  _latIdx = DEF_LAT_AXIS;
   uint8_t  _lonIdx = DEF_LON_AXIS;
   uint8_t  _vertIdx = DEF_VERT_AXIS;
+  int8_t   _latSign = DEF_LAT_SIGN;
   int8_t   _lonSign = DEF_LON_SIGN;
 
   /* 校准累加 */
@@ -71,6 +76,7 @@ class GMeter {
   float    _f[3] = {0, 0, 0};        // 滤波后的动态分量
   float    _fast[3] = {0, 0, 0};
   float    _mag = 0, _rawMag = 0, _peak = 0;
+  float    _dirPeak[4] = {0, 0, 0, 0};   /* 刹车 / 加速 / 左转 / 右转 */
   float    _noise = 0;
 
   /* 竖直历史（颠簸） */

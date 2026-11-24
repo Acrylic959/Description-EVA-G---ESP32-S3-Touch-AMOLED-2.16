@@ -106,41 +106,39 @@ GValueMeter/
 
 ## 4. 操作说明
 
-**按键**（侧面键 GPIO18 管翻页/清零；BOOT 键 GPIO0 专管重置水平面）
+**上电默认待机**：不采 G 值、麦克风挂起、帧率降到 20fps，宠物只播循环动画。**长按 BOOT 1.5 秒才开始测量**（再长按 1.5 秒停止）。
+
+**按键**（侧面键 GPIO18 管翻页/清零；BOOT 键 GPIO0 管开测/停测与重置水平面）
 
 | 操作 | 作用 |
 |---|---|
-| 短按 | 切到下一页（宠物 → 专业 → G-G 圆盘） |
-| 双击 | 清除历史最大 G（专业模式 PEAK 归零） |
-| 按一下 BOOT 键 | **重置水平面**：重新采重力零点（车身装歪、换了支架角度时用，要求停稳） |
-| 长按 1.2 秒 | 重新取重力零点（和 BOOT 键等效） |
+| 侧面键短按 | 切到下一页（宠物 → 专业 → G-G 圆盘） |
+| 侧面键双击 | 清除历史最大 G 与四向峰值 |
+| 侧面键长按 1.2 秒 | 重新取重力零点（测量中） |
+| BOOT 短按 | 重置水平面：重新采重力零点（要求停稳）；待机时只提示"长按开测" |
+| BOOT 长按 1.5 秒 | **开测 / 停测**（开测时自动清零峰值并重新取零点） |
 
-**触摸滑动**（屏上直接划，不用找按键）
-
-| 操作 | 作用 |
-|---|---|
-| 往左滑 | 下一页（宠物 → 专业 → G-G 圆盘 → 宠物） |
-| 往右滑 | 上一页 |
-
-滑动判定：单指、横向位移 ≥ 90px、横向大于纵向 2 倍、全程 < 1.4 秒；12ms 采一帧，不抢 IMU 的 I2C。
-上电先探测 CST9220（先试 0x5A 再试 0x15），探不到就只打印一行提示，按键功能照旧。
+**触摸已取消**：CST9220 的轮询会抢 I2C 带宽并拖低帧率，新固件只保留侧键翻页。`touch.h/.cpp` 还在，但不再被调用。
 
 **串口命令**（115200，一行一条，回车结束；`help` 列全部）
 
 | 命令 | 说明 |
 |---|---|
-| `cal` | 等同长按，重新取零点 |
+| `start` / `stop` | 开始 / 停止测量（等同长按 BOOT） |
+| `cal` | 重新取零点 |
 | `reset` | 清除峰值 |
 | `info` | 打印当前轴向映射、峰值、FPS、麦克风状态 |
 | `mode pet` / `mode pro` / `mode` | 切到宠物 / 切到专业 / 直接翻转 |
 | `bright=220` | 亮度 5~255（夜间建议 60~100，AMOLED 黑底很省电） |
-| `axis lat=x lon=-z vert=y` | 运行时改轴向映射并存 NVS，可只写其中一项 |
+| `axis lat=-x lon=-z vert=y` | 运行时改轴向映射与正负号并存 NVS，可只写其中一项 |
+| `bench` | 基准测试：整屏填充 / 拷贝入队 / DMA 排空各花多少毫秒，附带宽 |
 
 启动日志样例：
 
 ```
-[BOOT] G-Meter ready. 输入 help 查看串口命令
-[INFO] axis lat=X lon=Z vert=Y | peak=0.42 g | fps=30 | mic=ok
+[LCD] async QSPI push ready: 80MHz x4, pool=8x16KB, queue=16
+[INFO] STANDBY | axis lat=-X lon=-Z vert=Y | peak=0.11 4dir[0.00 0.00 0.00 0.00] | fps=15 draw=49ms wait=0ms dma=16ms | mic=ok
+[PERF] period=67ms | push=15ms fill=14ms queue=0ms flush=0ms | copy
 ```
 
 ---
@@ -263,13 +261,31 @@ tools/gen_cjk tools/chars_set.txt cjk_font.h   # 重新生成 cjk_font.h / cjk_f
 
 **峰值持久化**：`_peak` 存 NVS（命名空间 `gmeter`，键 `peak`），写 flash 节流 3 秒，不会写坏 flash。
 
-**映射与内存**：曲线快照在临界区里线性拷贝 120 float（约 480B），30fps 下开销可忽略。整帧推屏 460KB，QSPI 在 80MHz 下约 15ms，帧率仍能稳在 30。
+**推屏（异步 DMA）**：`panel_qspi.cpp` 在 Arduino_GFX 已初始化好的 SPI2 上再挂一个 spi_master 设备（CS 手动控制、整帧常低），用 `spi_device_queue_trans` 把像素块丢给 DMA，8×16KB 内部 DMA 池，80MHz 四线。推屏整体（字节拷贝 + 入队 + 排空）15ms，且跑在 **core 1 的独立任务** 上，与 core 0 的绘制并行。
+
+**帧缓冲**：两块 460KB PSRAM 缓冲交替（`allocExtra()` + `setBuffer()`），一块在推屏时另一块画下一帧；像素在写入时直接存成**大端**（`canvas_gfx.h` 的 `cgStore`），DMA 前只需 `memcpy` 进内部 RAM，不再逐像素 bswap（那一步实测要 25ms）。
+
+**性能实测与天花板**（真机日志）：
+
+| 指标 | 值 |
+|---|---|
+| 推屏（拷贝+入队+排空） | 15ms |
+| 其中 DMA 纯传输 | 约 11.5ms（460KB，40MB/s 级） |
+| 一帧绘制（三页都差不多） | 42~51ms |
+| 整屏填充一次（460KB 写 PSRAM） | 21ms → 21MB/s |
+| 实际帧率 | 15fps（待机 / 测量一样） |
+
+结论：瓶颈不是 SPI，而是 **PSRAM 写带宽（约 21MB/s）**。一屏填充就要 21ms，而三页 UI 每帧有 3 倍左右的像素重绘（多层辉光、逐点画弧），所以绘制占了 50ms。继续提速只能从"少写像素"下手（减少辉光层数、局部刷新），换 SPI 时钟没有意义。
+
+**方向约定（重要）**：`lat<0 = 左转`、`lon<0 = 刹车`。屏幕上的动效一律按**惯性**画：左转 → 宠物/圆点甩到右侧，刹车 → 往上。轴向取反用 `axis lat=-x lon=-z vert=y` 一次改完（默认值已是 `lat=-X lon=-Z vert=Y`，对应"屏面竖直朝驾驶员"的装法）。
 
 ---
 
 ## 8. 已知限制
 
-1. **轴向默认值靠推断**：`lat=X lon=Z vert=Y`、`lon` 正号，是按"屏幕竖直面向驾驶员、QMI8658 在板背面"推的。装载方式不同必须按第 3 节校验一次，用 `axis` 命令修正（不用重编译）。
+1. **轴向默认值靠实机校准**：当前默认 `lat=-X lon=-Z vert=Y`，是实机上"四个方向全反"之后定下来的符号；换装法（横装、倒装）用 `axis` 命令修正，不用重编译。
+7. **PSRAM 写带宽是硬墙**：整屏填充 21ms，UI 想再快必须减少重绘像素量，而不是调 SPI 时钟。
+8. **推屏不能零拷贝**：ESP32-S3 的 GPSPI DMA 不接受 PSRAM 地址（`spi_device_queue_trans` 直接返回 `ESP_ERR_INVALID_ARG`），必须拷进内部 RAM 再发，所以每帧有 14ms 的拷贝成本。
 2. **扬声器未使用**：ES8311 不参与，本固件只做麦克风输入，所以没有提示音。
 3. **麦克风增益是估值**：`MIC_GAIN_DB=8` 需要按实际车内噪音调一次。
 4. **没有做滤波后的陀螺仪融合**：只用加速度计，转弯判断靠侧向加速度，所以**匀速绕圈**不会触发转向表情（这符合 G 表的物理含义）。
@@ -281,10 +297,11 @@ tools/gen_cjk tools/chars_set.txt cjk_font.h   # 重新生成 cjk_font.h / cjk_f
 ## 9. 一页速查
 
 ```
-装库：GFX 1.6.4 / SensorLib 0.3.3 / XPowersLib 0.2.6
+装库：GFX 1.6.9 / XPowersLib 0.2.6（QMI8658 已改为自带驱动 qmi8658_min，不再依赖 SensorLib）
 板卡：ESP32S3 Dev Module + 16MB Flash + OPI PSRAM + USB CDC On Boot
-按键：短按翻页 / 双击清峰值 / 长按1.2s 取零点　触摸：左滑下一页 / 右滑上一页
-串口：cal reset info mode bright= axis
+按键：侧面键 短按翻页 / 双击清峰值 / 长按1.2s 取零点　BOOT 长按1.5s 开测停测
+上电：待机（不采 G、麦克风挂起、20fps）
+串口：start stop cal reset info bench mode bright= axis
 失灵三查：① 轴向(axis) ② 阈值(PET_*) ③ 麦克风增益(MIC_GAIN_DB)
 ```
 

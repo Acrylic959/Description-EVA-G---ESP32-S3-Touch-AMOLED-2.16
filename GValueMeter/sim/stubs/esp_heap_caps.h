@@ -10,3 +10,10 @@ inline void *heap_caps_malloc(size_t size, uint32_t caps) {
   (void)caps;
   return malloc(size);
 }
+
+inline void *heap_caps_aligned_alloc(size_t align, size_t size, uint32_t caps) {
+  (void)caps;
+  void *p = nullptr;
+  if (posix_memalign(&p, align < sizeof(void *) ? sizeof(void *) : align, size) != 0) return nullptr;
+  return p;
+}

@@ -53,7 +53,9 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   if (g.lon < -PET_BRK_G) _brkT = 0.95f;
   if (fabsf(g.lat) > PET_TURN_G) {
     _turnT = 0.55f;
-    _turnDir = (g.lat > 0.f) ? 1 : -1;
+    /* 惯性方向：左转（lat<0）身体被甩向右（+1），右转甩向左（-1）。
+     * 速度线 / 视线都跟着"被甩出去"的那一侧走。 */
+    _turnDir = (g.lat > 0.f) ? -1 : 1;
   }
 
   _accT  = fmaxf(0.f, _accT  - dt);
@@ -109,11 +111,12 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
   else if (_accT > 0.f)                    _mouth = M_OPEN;
   else                                     _mouth = M_SMILE;
 
-  /* --- 整体悬浮：目标是 G 方向 × 增益，二阶弹簧追，外加很慢的"液体"漂移 --- */
+  /* --- 整体悬浮：目标是"惯性甩出去"的方向 × 增益，二阶弹簧追，外加很慢的"液体"漂移 ---
+   *  刹车（lon<0）身体前冲 → 屏幕上方；左转（lat<0）身体右甩 → 屏幕右侧。 */
   {
     const float MAX_X = 44.f, MAX_Y = 40.f;
-    float tx = g.lat * 48.f + 3.2f * sinf(_t * 0.72f) + 2.2f * sinf(_t * 1.21f + 1.7f);
-    float ty = g.lon * 44.f + 2.6f * sinf(_t * 0.88f + 0.6f) + 1.6f * sinf(_t * 1.37f + 2.4f);
+    float tx = -g.lat * 48.f + 3.2f * sinf(_t * 0.72f) + 2.2f * sinf(_t * 1.21f + 1.7f);
+    float ty =  g.lon * 44.f + 2.6f * sinf(_t * 0.88f + 0.6f) + 1.6f * sinf(_t * 1.37f + 2.4f);
     if (tx >  MAX_X) tx =  MAX_X;  if (tx < -MAX_X) tx = -MAX_X;
     if (ty >  MAX_Y) ty =  MAX_Y;  if (ty < -MAX_Y) ty = -MAX_Y;
 
@@ -202,17 +205,23 @@ void PetMode::drawTopBar(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &
            lerp565(COL_PRO_PANEL, accent, 0.30f));
 
   char buf[24];
-  hudCN(c, 100, 17, 24, COL_DIM, "当前");
-  snprintf(buf, sizeof(buf), "%.2f", g.mag);
-  hudTextR(c, 306, 17, 3, accent, buf);
-  hudCN(c, 312, 24, 16, lerp565(COL_DIM, accent, 0.5f), "G");
+  if (_standby) {
+    /* 待机：不显示 G 值，提示怎么开测 */
+    hudCN(c, 100, 17, 24, COL_GREEN, "待机");
+    hudCN(c, 100, 49, 16, COL_DIM, "长按 BOOT 开测");
+  } else {
+    hudCN(c, 100, 17, 24, COL_DIM, "当前");
+    snprintf(buf, sizeof(buf), "%.2f", g.mag);
+    hudTextR(c, 306, 17, 3, accent, buf);
+    hudCN(c, 312, 24, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
-  hudCN(c, 100, 47, 24, COL_DIM, "最大");
-  snprintf(buf, sizeof(buf), "%.2f", g.peak);
-  hudTextR(c, 306, 47, 3, COL_AMBER, buf);
-  hudCN(c, 312, 54, 16, lerp565(COL_DIM, COL_AMBER, 0.5f), "G");
+    hudCN(c, 100, 47, 24, COL_DIM, "最大");
+    snprintf(buf, sizeof(buf), "%.2f", g.peak);
+    hudTextR(c, 306, 47, 3, COL_AMBER, buf);
+    hudCN(c, 312, 54, 16, lerp565(COL_DIM, COL_AMBER, 0.5f), "G");
+  }
 
-  /* 右侧 2D 气泡：点表示侧向 / 纵向的合成方向 */
+  /* 右侧 2D 气泡：点表示"惯性甩出去"的方向（与大脸、圆盘同一约定） */
   float bx = 386.f, by = 48.f, br = 27.f;
   hudRing(c, bx, by, br, br, 1.5f, lerp565(COL_PRO_PANEL, COL_DIM, 0.55f));
   c->fillRect((int16_t)(bx - 6), (int16_t)by, 12, 1, lerp565(COL_PRO_PANEL, COL_DIM, 0.35f));
@@ -221,8 +230,8 @@ void PetMode::drawTopBar(CanvasGFX *c, const GSnapshot &g, const AudioSnapshot &
   float lx = g.lat, ly = g.lon;
   if (lx > 1.f) lx = 1.f;  if (lx < -1.f) lx = -1.f;
   if (ly > 1.f) ly = 1.f;  if (ly < -1.f) ly = -1.f;
-  float dx = bx + lx * (br - 7.f);
-  float dy = by - ly * (br - 7.f);
+  float dx = bx - lx * (br - 7.f);      /* 左转 → 点向右 */
+  float dy = by + ly * (br - 7.f);      /* 刹车 → 点向上 */
   c->fillCircle((int16_t)dx, (int16_t)dy, 9, fade565(accent, KB, 0.35f));
   c->fillCircle((int16_t)dx, (int16_t)dy, 5, accent);
 

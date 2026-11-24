@@ -8,7 +8,8 @@
 
 namespace {
 
-const int16_t CH_X0 = 24, CH_X1 = 456, CH_Y0 = 326, CH_Y1 = 446;
+/* 硬件圆角会盖住屏幕四角：所有贴边元素左右各内缩到 [36, 444] */
+const int16_t CH_X0 = 36, CH_X1 = 444, CH_Y0 = 326, CH_Y1 = 446;
 const int16_t BAR_X0 = 112, BAR_X1 = 452, BAR_CEN = 282, BAR_HALF = 170, BAR_H = 20;
 
 /* 曲线纵轴映射：0 -> 底边，CHART_FULL_SCALE -> 顶边 */
@@ -64,8 +65,8 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
   drawBars(c, g);
 
-  hudCN(c, 24, 296, 24, COL_DIM, "G值曲线");
-  hudCNR(c, 452, 296, 24, COL_DIM, "120点 · 12秒");
+  hudCN(c, 36, 296, 24, COL_DIM, "G值曲线");
+  hudCNR(c, 444, 296, 24, COL_DIM, "120点 · 12秒");
 
   drawChart(c, g);
 
@@ -82,13 +83,13 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
 
 /* ------------------------------------------------------------------ */
 void ProMode::drawHeader(CanvasGFX *c, const GSnapshot &g) {
-  if (g.mag <= HIGH_G_LIMIT) hudCN(c, 18, 6, 24, COL_DIM, "G值表");
+  if (g.mag <= HIGH_G_LIMIT) hudCN(c, 36, 10, 24, COL_DIM, "G值表");
 
   char b[16];
   snprintf(b, sizeof(b), "%.2f", _peakS);
   int16_t pw = hudTextW(3, b);
-  hudTextR(c, 462, 8, 3, COL_AMBER, b);
-  hudCNR(c, 462 - pw - 10, 8, 24, lerp565(COL_DIM, COL_AMBER, 0.35f), "最大");
+  hudTextR(c, 444, 12, 3, COL_AMBER, b);
+  hudCNR(c, 444 - pw - 10, 12, 24, lerp565(COL_DIM, COL_AMBER, 0.35f), "最大");
 }
 
 void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
@@ -110,8 +111,8 @@ void ProMode::drawBigValue(CanvasGFX *c, const GSnapshot &g) {
 }
 
 void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
-  hudCN(c, 24, 184, 24, COL_DIM, "三轴分量");
-  hudCNR(c, 452, 190, 16, COL_DIM, "满量程 ±1G");
+  hudCN(c, 36, 184, 24, COL_DIM, "三轴分量");
+  hudCNR(c, 444, 190, 16, COL_DIM, "满量程 ±1G");
 
   {
     /* 三条都按自己的绝对值取色：绿 → 青 → 琥珀 → 红，超过 0.8G 自然变红 */
@@ -126,7 +127,7 @@ void ProMode::drawBars(CanvasGFX *c, const GSnapshot &g) {
 
 void ProMode::drawAxisBar(CanvasGFX *c, int16_t y, const char *label,
                           float v, uint16_t col) {
-  hudCN(c, 22, y + 2, 16, COL_TEXT, label);
+  hudCN(c, 36, y + 2, 16, COL_TEXT, label);
   char b[12];
   snprintf(b, sizeof(b), "%+.2f", v);
   hudTextR(c, 106, y + 6, 1, COL_DIM, b);

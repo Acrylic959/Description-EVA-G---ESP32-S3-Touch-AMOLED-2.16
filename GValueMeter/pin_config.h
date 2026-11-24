@@ -43,6 +43,9 @@
 #define IMU_PERIOD_MS   (1000 / IMU_RATE_HZ)
 #define UI_FPS           30
 #define UI_FRAME_MS      (1000 / UI_FPS)
+#define UI_FPS_STANDBY    20               /* 待机只播循环动画：降到 20fps 省电 */
+#define UI_FRAME_MS_STANDBY (1000 / UI_FPS_STANDBY)
+#define BOOT_LONG_MS      1500             /* BOOT 长按这么久 = 开测 / 停测 */
 #define CURVE_N         120          // 曲线点数（10Hz × 120 = 最近 12 秒）
 #define CURVE_PERIOD_MS 100
 
@@ -66,7 +69,11 @@
 #define DEF_LAT_AXIS   0     // 0=X 1=Y 2=Z
 #define DEF_LON_AXIS   2
 #define DEF_VERT_AXIS  1
-#define DEF_LON_SIGN   1     // +1 / -1
+/* 这块板子屏面竖直朝驾驶员安装时：X 轴指向车左、Z 轴指向车头，
+ * 所以 lat/lon 都必须取反；取反后约定 lat<0=左转、lon<0=刹车，
+ * 屏幕上的动效（惯性偏移、四向峰值）都按这个约定计算。 */
+#define DEF_LAT_SIGN   (-1)  // +1 / -1
+#define DEF_LON_SIGN   (-1)  // +1 / -1
 
 /* ---------------- 宠物表情阈值(g) ---------------- */
 #define PET_ACC_G      0.13f   // 纵向加速触发 ^ ^

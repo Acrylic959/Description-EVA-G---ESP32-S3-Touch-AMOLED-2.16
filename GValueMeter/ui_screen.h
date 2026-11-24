@@ -74,3 +74,12 @@ inline void uiCalOverlay(CanvasGFX *c, float progress) {
   c->fillRect(104, 446, 272, 6, COL_PRO_GRID);
   c->fillRect(104, 446, (int16_t)(272.f * progress), 6, COL_AMBER);
 }
+
+/* 待机提示（专业页 / 圆盘页中央）：未开测时不显示 G 值，只提示如何开测 */
+inline void uiStandbyHint(CanvasGFX *c, float t) {
+  float k = 0.5f + 0.5f * sinf(t * 2.4f);
+  hudPanel(c, 84, 198, 312, 68, 18, RGB565(17, 21, 34),
+           lerp565(COL_PRO_GRID, COL_GREEN, 0.30f + 0.45f * k));
+  hudCNC(c, 240, 208, 24, lerp565(COL_TEXT, COL_GREEN, 0.35f + 0.4f * k), "待机中");
+  hudCNC(c, 240, 240, 16, COL_DIM, "长按 BOOT 开始测量");
+}
