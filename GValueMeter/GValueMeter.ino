@@ -140,15 +140,14 @@ static void syncMicActive() {
 /* 三页循环：0 宠物 → 1 专业 → 2 G-G 圆盘 → 0 */
 static void applyMode(uint8_t m, bool announce = true) {
   g_mode = (uint8_t)(m % 3);
+  /* 模式切换不再弹提示框：切页本身就是反馈，浮层还会挡住内容 */
+  (void)announce;
   if (g_mode == 0) {
     pet.reset();
-    if (announce) setNotice("宠物表情模式");
   } else if (g_mode == 1) {
     pro.reset();
-    if (announce) setNotice("专业G值模式");
   } else {
     gg.reset();
-    if (announce) setNotice("G-G圆盘");
   }
   syncMicActive();
 }

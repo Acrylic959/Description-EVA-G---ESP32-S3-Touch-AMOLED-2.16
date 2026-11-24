@@ -99,8 +99,16 @@ void GgMode::draw(CanvasGFX *c, const GSnapshot &g) {
   hudCN(c, 302, 33, 16, lerp565(COL_DIM, accent, 0.5f), "G");
 
   /* ---- 四向峰值（取代原来的 刹车/加速/左转/右转 文字标签） ---- */
-  drawDirPeak(c, 208, 88, g.dirPeak[0], false);      /* 上：刹车峰值 */
-  drawDirPeak(c, 208, 386, g.dirPeak[1], false);     /* 下：加速峰值 */
+  /* 上下峰值必须和圆盘中轴对齐：按实际字宽算起点，不能写死 x */
+  {
+    char tb[12];
+    snprintf(tb, sizeof(tb), "%.2f", g.dirPeak[0]);
+    int16_t tw = hudTextW(2, tb);
+    drawDirPeak(c, (int16_t)(GG_CX - tw / 2), 88, g.dirPeak[0], false);   /* 上：刹车峰值 */
+    snprintf(tb, sizeof(tb), "%.2f", g.dirPeak[1]);
+    tw = hudTextW(2, tb);
+    drawDirPeak(c, (int16_t)(GG_CX - tw / 2), 386, g.dirPeak[1], false);  /* 下：加速峰值 */
+  }
   drawDirPeak(c, (int16_t)(GG_CX - GG_R - 8), 234, g.dirPeak[2], true);    /* 左：左转峰值 */
   drawDirPeak(c, (int16_t)(GG_CX + GG_R + 6), 234, g.dirPeak[3], false);   /* 右：右转峰值 */
 

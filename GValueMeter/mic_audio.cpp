@@ -121,10 +121,11 @@ void MicAudio::setActive(bool on) {
 
 /* ------------------------ 采集 + 特征提取 ------------------------------ */
 /* ============================ 频谱：512 点 FFT ============================ */
-#define SP_N     512
+#define SP_N     1024    /* 64ms 窗：512 点时频带能量抖得厉害，底噪也会把柱子顶起来 */
 #define SP_FS    16000.f
 
 static float s_re[SP_N], s_im[SP_N], s_smp[SP_N];
+static float s_bPow[AUDIO_BANDS];   /* 频带功率的帧间平滑，压掉随机的单帧跳动 */
 static int   s_fill = 0;
 
 static volatile float s_bands[AUDIO_BANDS];
@@ -146,6 +147,9 @@ static float s_midFloorDb  = -85.f;   /* 250~3500Hz（音乐主要能量）底�
 #define NF_SPEC_WIN 64     /* 频谱 ~15 帧/s → 约 4 秒 */
 #define NF_MID_WIN  160    /* 时域 ~15 次/s → 约 10 秒 */
 static float s_nRing[NF_SPEC_WIN];  static int s_nIdx = 0, s_nFill = 0;
+/* 每个频段单独一条底噪：安静时各段都贴着 0，不会因为"某一段偏高"就整排闪 */
+static float s_bFloor[AUDIO_BANDS]; static int s_bFill = 0, s_bIdx = 0;
+static float s_bRing[AUDIO_BANDS][NF_SPEC_WIN];
 static float s_midRing[NF_MID_WIN]; static int s_midIdx = 0, s_midFill = 0, s_midTick = 0;
 
 
@@ -208,8 +212,11 @@ static void computeSpectrum() {
     int k0 = s_k0[b], k1 = s_k1[b];
     float sum = 0.f;
     for (int k = k0; k <= k1; k++) sum += s_re[k] * s_re[k] + s_im[k] * s_im[k];
-    float amp = sqrtf(sum / (float)(k1 - k0 + 1)) / (float)SP_N;
-    float db = 20.f * log10f(amp + 1e-7f);        /* 约 -140..0 dB */
+    /* 先在功率域做帧间平滑（跨 2~3 帧），再转 dB：
+     * 短窗 FFT 的单帧波动能有十几 dB，不平滑的话安静时也会乱闪 */
+    float pw = sum / (float)(k1 - k0 + 1) / (float)(SP_N * SP_N);
+    s_bPow[b] = s_bPow[b] * 0.62f + pw * 0.38f;
+    float db = 10.f * log10f(s_bPow[b] + 1e-14f);   /* 约 -140..0 dB */
     if (db > dbmax) dbmax = db;
     dbSum += db;
     v0[b] = db;
@@ -225,25 +232,52 @@ static void computeSpectrum() {
   for (int i = 1; i < s_nFill; i++) if (s_nRing[i] < nfloor) nfloor = s_nRing[i];
   s_nFloorDb = (nfloor < s_nFloorDb) ? nfloor : s_nFloorDb + (nfloor - s_nFloorDb) * 0.30f;
 
+  /* 逐频段底噪：每段记最近 4 秒最安静的一帧，段与段互不影响 */
+  if (s_bFill == 0) {
+    for (int b = 0; b < AUDIO_BANDS; b++) {
+      s_bFloor[b] = v0[b];
+      for (int i = 0; i < NF_SPEC_WIN; i++) s_bRing[b][i] = v0[b];
+    }
+    s_bFill = 1;
+  } else {
+    for (int b = 0; b < AUDIO_BANDS; b++) {
+      s_bRing[b][s_bIdx] = v0[b];
+      float bf = s_bRing[b][0];
+      for (int i = 1; i < NF_SPEC_WIN; i++) if (s_bRing[b][i] < bf) bf = s_bRing[b][i];
+      s_bFloor[b] = (bf < s_bFloor[b]) ? bf : s_bFloor[b] + (bf - s_bFloor[b]) * 0.30f;
+    }
+    s_bIdx = (s_bIdx + 1) % NF_SPEC_WIN;
+  }
+
   /* 噪声门（dB 域）：底噪 +6dB 以下一律按 0。车里胎噪/风噪 60~70dB 的底子
    * 直接被门挡住，只有真正高出一截的音乐才会让柱子动 */
-  float gateDb = s_nFloorDb + 6.0f;
-  float span   = 26.0f;                          /* 门限 +26dB 到满格 */
+  float span = 22.0f;                            /* 门限 +22dB 到满格 */
   for (int b = 0; b < AUDIO_BANDS; b++) {
-    float v = (v0[b] - gateDb) * (1.f / span);
+    float v = (v0[b] - (s_bFloor[b] + 10.0f)) * (1.f / span);  /* 要比自己那段底噪高 10dB 才起步 */
     if (v < 0.f) v = 0.f;
+    if (v < 0.08f) v = 0.f;                      /* 死区：底噪上下抖动不出柱 */
     if (v > 1.f) v = 1.f;
     v0[b] = v;
     if (v > vmax) vmax = v;
   }
 
-  /* 自动增益：门限之上的最响柱往满格拉（只放大不衰减，最多 4 倍） */
-  if (vmax > s_agc) s_agc += (vmax - s_agc) * 0.50f;
-  else              s_agc += (vmax - s_agc) * 0.05f;
+  /* 自动增益：只有"确实有内容"（最响的段超出自己底噪 12dB 以上）才抬增益，
+   * 纯底噪一律 gain=1，安静环境下不会把残留噪声放大成柱子 */
+  float maxSnr = -999.f;
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    float snrb = v0[b] - s_bFloor[b];
+    if (snrb > maxSnr) maxSnr = snrb;
+  }
+  if (maxSnr > 12.f) {
+    if (vmax > s_agc) s_agc += (vmax - s_agc) * 0.50f;
+    else              s_agc += (vmax - s_agc) * 0.05f;
+  } else {
+    s_agc = 0.f;
+  }
   float gain = 1.f;
-  if (s_agc > 0.20f) gain = 0.95f / s_agc;
+  if (s_agc > 0.28f) gain = 0.95f / s_agc;
   if (gain < 1.f) gain = 1.f;
-  if (gain > 4.f) gain = 4.f;
+  if (gain > 2.5f) gain = 2.5f;                 /* 别把残留底噪也放大成柱子 */
 
   for (int b = 0; b < AUDIO_BANDS; b++) {
     float v = v0[b] * gain;
@@ -260,14 +294,16 @@ static void computeSpectrum() {
   static int dbg = 0;
   if (++dbg >= 30) {
     dbg = 0;
-    Serial.printf("[SPEC] dbmax=%.1f floor=%.1f gate=%.1f midfloor=%.1f gain=%.2f\r\n",
-                  dbmax, s_nFloorDb, s_nFloorDb + 6.0f, s_midFloorDb, gain);
+    float barSum = 0.f; for (int b = 0; b < AUDIO_BANDS; b++) barSum += s_bands[b];
+    Serial.printf("[SPEC] dbmax=%.1f b0floor=%.1f midfloor=%.1f gain=%.2f bar=%.2f\r\n",
+                  dbmax, s_bFloor[0], s_midFloorDb, gain, barSum);
   }
 }
 
 void MicAudio::setSpectrum(bool on) {
   s_specOn = on;
   s_fill = 0;
+  for (int b = 0; b < AUDIO_BANDS; b++) s_bPow[b] = 0.f;
   if (on) {                                  /* 重新开时清掉上一轮的柱形/峰值/增益 */
     for (int i = 0; i < AUDIO_BANDS; i++) { s_bands[i] = 0.f; s_pk[i] = 0.f; }
     s_agc = 0.f;

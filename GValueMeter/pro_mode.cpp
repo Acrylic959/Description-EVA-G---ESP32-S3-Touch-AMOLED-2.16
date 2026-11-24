@@ -60,7 +60,9 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
     _needFull = false;
   } else {
     c->fillRect(0, 0, 480, 46, COL_PRO_BG);      /* 表头：数字宽度会变，必须清，否则残影重叠 */
-    c->fillRect(30, 36, 420, 106, COL_PRO_BG);   /* 大数字 / 单位 G */
+    /* 连报警横幅那一段（到分隔线 182 之前）一起清掉：
+     原来只清到 y=142，横幅底部没清 → 报警消失后会留下残影 */
+    c->fillRect(0, 36, 480, 144, COL_PRO_BG);   /* 大数字 / 单位 G */
     c->fillRect(0, 178, 480, 136, COL_PRO_BG);   /* 分隔线 + 标签 + 三条分量条 + 曲线标题 */
   }
   _alarmPrev = alarmNow;
@@ -81,9 +83,9 @@ void ProMode::draw(CanvasGFX *c, const GSnapshot &g) {
   if (alarmNow) {
     float ph = 0.5f + 0.5f * sinf(millis() * 0.0055f);   /* 平滑呼吸（原来那条整屏红框已按反馈删除） */
     uint16_t bg = lerp565(COL_PRO_BG, COL_RED, 0.18f + 0.22f * ph);
-    hudPanel(c, 154, 146, 172, 32, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
-    hudGlowBorder(c, 154, 146, 172, 32, 14, COL_RED, bg, 0.18f + 0.30f * ph);
-    hudCNC(c, 240, 154, 22, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
+    hudPanel(c, 158, 136, 164, 30, 14, bg, lerp565(COL_RED, COL_PRO_BG, 0.35f + 0.5f * ph));
+    hudGlowBorder(c, 158, 136, 164, 30, 14, COL_RED, bg, 0.18f + 0.30f * ph);
+    hudCNC(c, 240, 143, 22, lerp565(COL_RED, COL_TEXT, 0.15f + 0.35f * ph), "高G报警");
   }
 }
 
