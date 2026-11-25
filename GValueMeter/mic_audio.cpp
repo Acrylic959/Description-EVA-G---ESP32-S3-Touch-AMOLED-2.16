@@ -249,31 +249,42 @@ static void computeSpectrum() {
     s_bIdx = (s_bIdx + 1) % NF_SPEC_WIN;
   }
 
-  /* 逐段 SNR（相对本段底噪），并找最响的一段 */
+  /* 逐段 SNR（相对本段底噪） */
   float snrB[AUDIO_BANDS];
-  float maxSnr = -999.f;
-  for (int b = 0; b < AUDIO_BANDS; b++) {
-    snrB[b] = v0[b] - s_bFloor[b];
-    if (snrB[b] > maxSnr) maxSnr = snrB[b];
+  for (int b = 0; b < AUDIO_BANDS; b++) snrB[b] = v0[b] - s_bFloor[b];
+
+  /* "满格"对应的 SNR：取 80% 分位而不是最响的那一段。
+   * 用最响段做满格的话（上一版），车里正常音量放歌时只有个别峰值段能顶到，
+   * 其余段全挤在 0.1~0.3，看起来就是"频谱不怎么动"。 */
+  float srt[AUDIO_BANDS];
+  for (int b = 0; b < AUDIO_BANDS; b++) srt[b] = snrB[b];
+  for (int i = 1; i < AUDIO_BANDS; i++) {          /* 20 个元素的插入排序，代价可忽略 */
+    float t = srt[i];
+    int j = i - 1;
+    while (j >= 0 && srt[j] > t) { srt[j + 1] = srt[j]; j--; }
+    srt[j + 1] = t;
   }
+  float p80 = srt[(AUDIO_BANDS * 4) / 5];
 
-  /* "满格"对应的 SNR 自适应：跟住最近的音乐响度（抬得快、落得慢）。
-   * 关键点：满格按 1.18 倍留余量，最响的那段也只到 ~0.85，
-   * 一般车内音量（70~85dB 播放）不会一路顶到上限。 */
   static float s_ceil = 22.f;
-  if (maxSnr > s_ceil) s_ceil += (maxSnr - s_ceil) * 0.06f;
-  else                 s_ceil += (maxSnr - s_ceil) * 0.004f;
-  if (s_ceil < 18.f) s_ceil = 18.f;
-  if (s_ceil > 46.f) s_ceil = 46.f;
+  if (p80 > s_ceil) s_ceil += (p80 - s_ceil) * 0.06f;      /* 抬：~0.3s 跟上 */
+  else              s_ceil += (p80 - s_ceil) * 0.020f;     /* 落：约 1 分钟，音量变小也不会立刻虚涨 */
+  if (s_ceil < 20.f) s_ceil = 20.f;
+  if (s_ceil > 38.f) s_ceil = 38.f;
 
-  const float startSnr = 8.f;                    /* 高出本段底噪 8dB 才起步 */
-  float denom = (s_ceil - startSnr) * 1.18f;
+  const float startSnr = 9.f;                    /* 高出本段底噪 9dB 才起步 */
+  float denom = (s_ceil - startSnr);
   if (denom < 8.f) denom = 8.f;
 
+  /* 静音总闸：整段最响的地方只比全局底噪高不到 8dB，就当没声音，
+   * 这样安静环境里不会有零星柱子在闪（车内音乐一开就能到 15~40dB） */
+  float quiet = (dbmax - s_nFloorDb) < 8.f;
+
   for (int b = 0; b < AUDIO_BANDS; b++) {
-    float v = (snrB[b] - startSnr) * (1.f / denom);
-    if (v < 0.08f) v = 0.f;                      /* 死区：底噪抖动不出柱 */
+    float v = quiet ? 0.f : (snrB[b] - startSnr) * (1.f / denom);
+    if (v < 0.06f) v = 0.f;                      /* 死区：底噪抖动不出柱 */
     if (v > 1.f) v = 1.f;
+    v = powf(v, 0.78f);                          /* 轻微压顶：中段抬起来，别都贴在底部 */
     float old = s_bands[b];
     /* 起音快、回落更慢：柱形平滑，不会一抖一抖 */
     s_bands[b] = (v > old) ? (old + (v - old) * 0.45f) : (old + (v - old) * 0.075f);

@@ -178,8 +178,10 @@ void PetMode::update(const GSnapshot &g, const AudioSnapshot &a, float dt) {
    *  刹车（lon<0）身体前冲 → 屏幕上方；左转（lat<0）身体右甩 → 屏幕右侧。 */
   {
     const float MAX_X = 74.f, MAX_Y = 58.f;
-    float tx = -g.lat * 86.f + 4.0f * sinf(_t * 0.72f) + 2.6f * sinf(_t * 1.21f + 1.7f);
-    float ty =  g.lon * 74.f + 3.2f * sinf(_t * 0.88f + 0.6f) + 2.0f * sinf(_t * 1.37f + 2.4f);
+    /* 日常行车 G 值多在 0.5 以内，原来 86/74 的增益太"温"，0.2G 才挪十几像素；
+     * 提到 150/125 后 0.3G 就能顶到底，小幅加减速也看得出来。 */
+    float tx = -g.lat * 150.f + 4.0f * sinf(_t * 0.72f) + 2.6f * sinf(_t * 1.21f + 1.7f);
+    float ty =  g.lon * 125.f + 3.2f * sinf(_t * 0.88f + 0.6f) + 2.0f * sinf(_t * 1.37f + 2.4f);
     if (tx >  MAX_X) tx =  MAX_X;  if (tx < -MAX_X) tx = -MAX_X;
     if (ty >  MAX_Y) ty =  MAX_Y;  if (ty < -MAX_Y) ty = -MAX_Y;
 
@@ -486,14 +488,7 @@ void PetMode::drawEffectsFront(CanvasGFX *c, float cx, float cy, float R,
     }
   }
 
-  /* 刹车 / 高 G：感叹号 */
-  float bangK = (_brkT > 0.30f) ? _brkT / 0.95f : 0.f;
-  if (g.mag > HIGH_G_LIMIT) bangK = fmaxf(bangK, 0.65f + 0.35f * sinf(_t * 18.f));
-  if (bangK > 0.05f) {
-    if (bangK > 1.f) bangK = 1.f;
-    float len = 22.f + 4.f * sinf(_t * 14.f);
-    hudBang(c, cx, 100.f, len, 11.f, fade565(COL_RED, KB, 0.30f + 0.70f * bangK));
-  }
+  /* 刹车 / 高 G 的感叹号已去掉：日常行车 G 值小，红感叹号反而显得"报错" */
 
   /* 打哈欠：头顶飘出三个越来越大的 Z */
   if (_yawnOpen > 0.20f) {

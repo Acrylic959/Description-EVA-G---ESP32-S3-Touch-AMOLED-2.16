@@ -50,6 +50,8 @@ class GMeter {
   void setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t latSign, int8_t lonSign);
   void getAxis(uint8_t &lat, uint8_t &lon, uint8_t &vert, int8_t &latSign, int8_t &lonSign) const;
   void saveAxis();
+  void setAutoAxis(bool on);                 // 自动姿态（横放/竖放自动换轴向）
+  bool autoAxis() const { return _autoAxis; }
 
  private:
   float pick(const float *v, uint8_t idx) const { return v[idx]; }
@@ -66,6 +68,12 @@ class GMeter {
   uint8_t  _vertIdx = DEF_VERT_AXIS;
   int8_t   _latSign = DEF_LAT_SIGN;
   int8_t   _lonSign = DEF_LON_SIGN;
+
+  /* 自动姿态：屏幕立着（Y 更竖）用 lon=Z；屏幕平放用 lon=Y、vert=Z。
+   * 重力方向实时估计后整条减掉，横放/竖放/斜拿静态读数都归零。 */
+  bool     _autoAxis = true;
+  float    _grav[3] = {0, 0, 1};      // 重力方向（单位化前的原始矢量）
+  float    _gmag = 0.9f;              // 重力模长估计（IMU 刻度可能不是 1.000）
 
   /* 校准累加 */
   int      _calN = 0;

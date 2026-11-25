@@ -311,14 +311,15 @@ static void printInfo() {
   const char *nm[3] = {"X", "Y", "Z"};
   GSnapshot g;
   gm.snapshot(g);
-  Serial.printf("[INFO] %s | axis lat=%s%s lon=%s%s vert=%s | peak=%.2f 4dir[%.2f %.2f %.2f %.2f] | fps=%u draw=%ums wait=%ums dma=%ums | mic=%s\r\n",
+  Serial.printf("[INFO] %s | axis %s lat=%s%s lon=%s%s vert=%s | peak=%.2f 4dir[%.2f %.2f %.2f %.2f] | fps=%u draw=%ums wait=%ums dma=%ums | mic=%s\r\n",
                 g_measuring ? "MEASURE" : "STANDBY",
+                gm.autoAxis() ? "AUTO" : "FIX",
                 (las < 0 ? "-" : ""), nm[lat], (ls < 0 ? "-" : ""), nm[lon], nm[vert],
                 gm.peak(), g.dirPeak[0], g.dirPeak[1], g.dirPeak[2], g.dirPeak[3],
                 g_fps, (unsigned)(g_drawUs / 1000), (unsigned)(g_waitUs / 1000),
                 (unsigned)(g_dmaUs / 1000), mic.ok() ? "ok" : "off");
-  Serial.printf("[BAT] %d%%%s | petG=%s\r\n", g_battPct, g_battChg ? " charging" : "",
-                g_hideG ? "hidden" : "shown");
+  Serial.printf("[BAT] %d%%%s | petG=%s | lat=%+.2f lon=%+.2f vert=%+.2f mag=%.2f\r\n", g_battPct, g_battChg ? " charging" : "",
+                g_hideG ? "hidden" : "shown", g.lat, g.lon, g.vert, g.mag);
   Serial.printf("[PERF] period=%ums | push=%ums fill=%ums queue=%ums flush=%ums | %s\r\n",
                 (unsigned)(g_perUs / 1000),
                 (unsigned)(panelPushUs() / 1000), (unsigned)(panelFillUs() / 1000),
@@ -531,6 +532,11 @@ static void execCmd(char *cmd) {
     int8_t las, ls;
     int sg;
     gm.getAxis(lat, lon, vert, las, ls);
+    if (strstr(cmd, "auto")) {                 /* 回到自动姿态识别 */
+      gm.setAutoAxis(true);
+      printInfo();
+      return;
+    }
     bool any = false;
     if (findAxis(cmd, "lat", i, sg))   { lat = i; las = (int8_t)sg; any = true; }
     if (findAxis(cmd, "lon", i, sg))   { lon = i; ls = (int8_t)sg; any = true; }
@@ -593,7 +599,6 @@ static void updateBootKey(uint32_t now) {
         Serial.printf("[KEY] %s\r\n", g_hideG ? "hide G" : "show G");
       } else if (g_measuring) {
         gm.requestZero();
-        setNotice("重新校准水平，请保持静止", 2200);
         Serial.println("[BOOT] 水平零点重取");
       } else {
         setNotice("待机中，长按 BOOT 开始测量", 2000);
@@ -620,14 +625,7 @@ static void updateButtons(uint32_t now) {
     releaseMs = now;
     if (!longDone) {
       uint32_t held = now - downMs;
-      if (held > 40) {
-        clicks++;
-        if (clicks >= 2) {
-          clicks = 0;
-          gm.resetPeak();
-          setNotice("峰值已清零");
-        }
-      }
+      if (held > 40) clicks = 1;                /* 双击清峰值已删除：只认单击切页 */
     }
   } else if (raw && pressed && !longDone) {    // 长按
     if (now - downMs > 1200) {
@@ -653,6 +651,14 @@ static void setSpectrumMode(bool on) {
   g_spec = on;
   mic.setSpectrum(on);
   syncMicActive();                                  /* 频谱要用麦克风，待机时临时开起来 */
+  /* 频谱页与三页互相切换时整屏重推 + 让当前页按整屏重画，
+   * 否则专业页的局部刷新会把频谱的像素留在屏上（切换残留） */
+  if (!on) {
+    if (g_mode == 0) pet.reset();
+    else if (g_mode == 1) pro.reset();
+    else gg.reset();
+  }
+  requestFullPush();
   setNotice(on ? "频谱柱已开启" : "频谱柱已关闭", 1200);
   Serial.printf("[CMD] spectrum %s\r\n", on ? "on" : "off");
 }
@@ -824,6 +830,13 @@ void loop() {
     }
 
     if (!g_measuring && g_mode != 0 && !g_spec) uiStandbyHint(&canvas, now * 0.001f);
+    /* 提示框消失后必须重画它压过的地方：否则局部刷新不会去擦，会一直"留"在屏上 */
+    static bool noticeWas = false;
+    bool noticeNow = (g_notice[0] && now <= g_noticeUntil);
+    if (noticeWas && !noticeNow) {
+      if (g_mode == 1 && !g_spec) pro.requestFull();
+    }
+    noticeWas = noticeNow;
     /* 校准浮层（底部黄色进度框）消失后必须整页重画，否则会留在屏幕上 */
     static bool calPrev = false;
     if (calPrev && !g.calibrating) pro.requestFull();

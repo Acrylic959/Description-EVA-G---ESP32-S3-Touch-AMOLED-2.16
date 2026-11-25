@@ -21,6 +21,12 @@ class Preferences {
   }
   void putFloat(const char *k, float v) { store(k, v); }
 
+  bool getBool(const char *k, bool def = false) {
+    int i = find(k);
+    return i < 0 ? def : (_v[i] > 0.5f);
+  }
+  void putBool(const char *k, bool v) { store(k, v ? 1.f : 0.f); }
+
  private:
   int find(const char *k) {
     char full[40];
