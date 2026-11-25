@@ -19,7 +19,7 @@ bool GMeter::begin() {
    * 否则改了 DEF_*_SIGN 也不会生效。 */
   uint8_t sig = s_prefs.getUChar("sig", 0);
   uint8_t ax  = s_prefs.getUChar("ax", 0xFF);
-  if (sig == 0xA8 && ax != 0xFF) {
+  if (sig == 0xA9 && ax != 0xFF) {
     _latIdx  = ax & 0x03;
     _lonIdx  = (ax >> 2) & 0x03;
     _vertIdx = (ax >> 4) & 0x03;
@@ -31,11 +31,10 @@ bool GMeter::begin() {
   } else {
     _latIdx = DEF_LAT_AXIS; _lonIdx = DEF_LON_AXIS; _vertIdx = DEF_VERT_AXIS;
     _latSign = DEF_LAT_SIGN; _lonSign = DEF_LON_SIGN;
-    s_prefs.putUChar("sig", 0xA8);
+    s_prefs.putUChar("sig", 0xA9);
     saveAxis();
   }
   _peak = s_prefs.getFloat("peak", 0.f);
-  _autoAxis = s_prefs.getBool("auto", true);
 
   /* 板上 SA0 通常拉低 => 0x6A；个别批次为 0x6B，两个都试一次 */
   _imuOk = qmiBegin(IIC_SDA, IIC_SCL);
@@ -74,18 +73,9 @@ void GMeter::setAxis(uint8_t lat, uint8_t lon, uint8_t vert, int8_t latSign, int
   _latIdx = lat; _lonIdx = lon; _vertIdx = vert;
   _latSign = latSign < 0 ? -1 : 1;
   _lonSign = lonSign < 0 ? -1 : 1;
-  _autoAxis = false;
   s_prefs.begin("gmeter", false);
-  s_prefs.putUChar("sig", 0xA8);
+  s_prefs.putUChar("sig", 0xA9);
   s_prefs.putBool("auto", false);
-  saveAxis();
-}
-
-void GMeter::setAutoAxis(bool on) {
-  _autoAxis = on;
-  s_prefs.begin("gmeter", false);
-  s_prefs.putBool("auto", on);
-  s_prefs.putUChar("sig", 0xA8);
   saveAxis();
 }
 
@@ -143,11 +133,6 @@ void GMeter::taskStep() {
         if (var > 0) varSum += var;
       }
       _noise = sqrtf(varSum / 3.f);            // 静止噪声（各轴标准差 RMS）
-      /* 重力估计从零点采样均值出发，之后逐帧低通跟住 */
-      _grav[0] = _g0[0]; _grav[1] = _g0[1]; _grav[2] = _g0[2];
-      _gmag = sqrtf(_g0[0] * _g0[0] + _g0[1] * _g0[1] + _g0[2] * _g0[2]);
-      if (_gmag < 0.75f) _gmag = 0.75f;
-      if (_gmag > 1.25f) _gmag = 1.25f;
       _f[0] = _f[1] = _f[2] = 0.f;
       _fast[0] = _fast[1] = _fast[2] = 0.f;
       _mag = _rawMag = 0.f;
@@ -172,47 +157,15 @@ void GMeter::taskStep() {
   if (dt <= 0.f) dt = 0.001f;
   if (dt > 0.2f) dt = 0.2f;
 
-  /* ---- 3) 动态加速度：重力方向实时估计后整条减掉 ----
-   * 只减一次固定零点的话，设备换个摆放角度（屏立着 ↔ 平放）重力就会串到
-   * 别的轴上：静态读数 0.7G、圆球被顶在下半圆、轴向看起来"调换"。
-   * 这里用一阶低通跟住重力方向并单位化：
-   *   rd = v·u（沿重力的分量，静止 ≈ 1）
-   *   d  = v - rd·u（动态加速度，静止恒为 0，任意姿态都不串轴）
-   *   vert = 1 - rd（竖直动态，向上为正） */
-  float aG = 1.f - expf(-dt / 2.0f);
-  _grav[0] += (v[0] - _grav[0]) * aG;
-  _grav[1] += (v[1] - _grav[1]) * aG;
-  _grav[2] += (v[2] - _grav[2]) * aG;
-  float gl = sqrtf(_grav[0] * _grav[0] + _grav[1] * _grav[1] + _grav[2] * _grav[2]);
-  if (gl < 0.25f) {                       /* 估计还没起来：退回固定零点 */
-    _grav[0] = _g0[0]; _grav[1] = _g0[1]; _grav[2] = _g0[2];
-    gl = sqrtf(_g0[0] * _g0[0] + _g0[1] * _g0[1] + _g0[2] * _g0[2]);
-    if (gl < 0.25f) gl = 1.f;
-  }
-  float u0 = _grav[0] / gl, u1 = _grav[1] / gl, u2 = _grav[2] / gl;
+  /* ---- 3) 动态加速度：减一次静止零点（= 校准时的水平面） ----
+   * 圆盘按"水平仪"理解：每次校准重设水平面，之后只比对这个零点。
+   * 不做重力方向估计 / 姿态识别——G-G 圆盘要的是"车身相对校准姿态"的
+   * 持续偏移，任何会把稳态加速度慢慢吃掉的补偿都会让小球自己溜回中心。 */
+  float d[3] = {v[0] - _g0[0], v[1] - _g0[1], v[2] - _g0[2]};
 
-  /* 重力模长也跟住（这块 IMU 原始 |g| 大约 0.87，用它做静止基准，
-   * 竖直条才不会一直顶着一个 0.13 的常数偏置） */
-  _gmag += (gl - _gmag) * aG;
-  if (_gmag < 0.75f) _gmag = 0.75f;
-  if (_gmag > 1.25f) _gmag = 1.25f;
-
-  float rd = v[0] * u0 + v[1] * u1 + v[2] * u2;
-  float d[3] = {v[0] - rd * u0, v[1] - rd * u1, v[2] - rd * u2};
-  float vertDyn = _gmag - rd;
-
-  float lat, lon, vert;
-  if (_autoAxis) {
-    /* u 更像 Y 轴 → 屏幕立着：纵向取 Z；否则屏幕平放：纵向取 Y */
-    bool upright = fabsf(u1) >= fabsf(u2);
-    lat  = d[_latIdx] * (float)_latSign;
-    lon  = (upright ? d[2] : d[1]) * (float)_lonSign;
-    vert = vertDyn;
-  } else {
-    lat  = pick(d, _latIdx) * (float)_latSign;
-    lon  = pick(d, _lonIdx) * (float)_lonSign;
-    vert = vertDyn;
-  }
+  float lat  = pick(d, _latIdx) * (float)_latSign;
+  float lon  = pick(d, _lonIdx) * (float)_lonSign;
+  float vert = pick(d, _vertIdx);
 
   float aSlow = 1.f - expf(-dt / ACC_FILTER_TAU);
   float aFast = 1.f - expf(-dt / PEAK_TAU);

@@ -311,9 +311,8 @@ static void printInfo() {
   const char *nm[3] = {"X", "Y", "Z"};
   GSnapshot g;
   gm.snapshot(g);
-  Serial.printf("[INFO] %s | axis %s lat=%s%s lon=%s%s vert=%s | peak=%.2f 4dir[%.2f %.2f %.2f %.2f] | fps=%u draw=%ums wait=%ums dma=%ums | mic=%s\r\n",
+  Serial.printf("[INFO] %s | axis lat=%s%s lon=%s%s vert=%s | peak=%.2f 4dir[%.2f %.2f %.2f %.2f] | fps=%u draw=%ums wait=%ums dma=%ums | mic=%s\r\n",
                 g_measuring ? "MEASURE" : "STANDBY",
-                gm.autoAxis() ? "AUTO" : "FIX",
                 (las < 0 ? "-" : ""), nm[lat], (ls < 0 ? "-" : ""), nm[lon], nm[vert],
                 gm.peak(), g.dirPeak[0], g.dirPeak[1], g.dirPeak[2], g.dirPeak[3],
                 g_fps, (unsigned)(g_drawUs / 1000), (unsigned)(g_waitUs / 1000),
@@ -532,11 +531,6 @@ static void execCmd(char *cmd) {
     int8_t las, ls;
     int sg;
     gm.getAxis(lat, lon, vert, las, ls);
-    if (strstr(cmd, "auto")) {                 /* 回到自动姿态识别 */
-      gm.setAutoAxis(true);
-      printInfo();
-      return;
-    }
     bool any = false;
     if (findAxis(cmd, "lat", i, sg))   { lat = i; las = (int8_t)sg; any = true; }
     if (findAxis(cmd, "lon", i, sg))   { lon = i; ls = (int8_t)sg; any = true; }
